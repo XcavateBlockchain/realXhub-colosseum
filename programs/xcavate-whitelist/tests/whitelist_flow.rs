@@ -1,0 +1,1067 @@
+//! Behavioural tests for the roles & compliance registry.
+//!
+//! The program does no token transfers, so LiteSVM covers every path end to
+//! end, and nothing here needs a Surfpool integration run.
+
+use anchor_lang::{
+    prelude::Pubkey, solana_program::instruction::Instruction, AccountDeserialize, InstructionData,
+    ToAccountMetas,
+};
+use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};
+use litesvm::LiteSVM;
+use solana_keypair::Keypair;
+use solana_message::{Message, VersionedMessage};
+use solana_signer::Signer;
+use solana_transaction::versioned::VersionedTransaction;
+use xcavate_whitelist::state::{AccessPermission, Admin, Config, Role, RoleAccount};
+use xcavate_whitelist::{ADMIN_SEED, CONFIG_SEED, ROLE_SEED};
+
+const SYS: Pubkey = anchor_lang::system_program::ID;
+
+// --- PDA helpers ---
+
+fn pid() -> Pubkey {
+    xcavate_whitelist::id()
+}
+
+fn config_pda() -> Pubkey {
+    Pubkey::find_program_address(&[CONFIG_SEED], &pid()).0
+}
+
+fn admin_pda(who: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[ADMIN_SEED, who.as_ref()], &pid()).0
+}
+
+fn role_pda(user: &Pubkey, role: Role) -> Pubkey {
+    Pubkey::find_program_address(&[ROLE_SEED, user.as_ref(), &[role.seed_byte()]], &pid()).0
+}
+
+// --- instruction builders ---
+
+// The programdata account the upgradeable loader keeps beside the program.
+fn program_data_pda() -> Pubkey {
+    Pubkey::find_program_address(
+        &[pid().as_ref()],
+        &anchor_lang::solana_program::bpf_loader_upgradeable::ID,
+    )
+    .0
+}
+
+// Point the program's upgrade authority at `authority` so the authority-bound
+// initialize passes. The loader metadata is 4 bytes of enum tag, 8 of slot,
+// then an optional pubkey.
+fn bind_upgrade_authority(svm: &mut LiteSVM, authority: &Pubkey) {
+    let pd = program_data_pda();
+    let mut acc = svm.get_account(&pd).unwrap();
+    acc.data[12] = 1;
+    acc.data[13..45].copy_from_slice(authority.as_ref());
+    svm.set_account(pd, acc).unwrap();
+}
+
+fn init_ix(authority: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &xcavate_whitelist::instruction::InitializeConfig {}.data(),
+        xcavate_whitelist::accounts::InitializeConfig {
+            authority: *authority,
+            program: pid(),
+            program_data: program_data_pda(),
+            config: config_pda(),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn add_admin_ix(authority: &Pubkey, new_admin: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &xcavate_whitelist::instruction::AddAdmin {}.data(),
+        xcavate_whitelist::accounts::AddAdmin {
+            authority: *authority,
+            config: config_pda(),
+            new_admin: *new_admin,
+            admin: admin_pda(new_admin),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn remove_admin_ix(authority: &Pubkey, target: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &xcavate_whitelist::instruction::RemoveAdmin {}.data(),
+        xcavate_whitelist::accounts::RemoveAdmin {
+            authority: *authority,
+            config: config_pda(),
+            admin: admin_pda(target),
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn assign_ix(admin: &Pubkey, user: &Pubkey, role: Role) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &xcavate_whitelist::instruction::AssignRole { role }.data(),
+        xcavate_whitelist::accounts::AssignRole {
+            admin_signer: *admin,
+            admin: admin_pda(admin),
+            user: *user,
+            role_account: role_pda(user, role),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn remove_role_ix(admin: &Pubkey, user: &Pubkey, role: Role) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &xcavate_whitelist::instruction::RemoveRole { role }.data(),
+        xcavate_whitelist::accounts::RemoveRole {
+            admin_signer: *admin,
+            admin: admin_pda(admin),
+            user: *user,
+            role_account: role_pda(user, role),
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn set_perm_ix(
+    admin: &Pubkey,
+    user: &Pubkey,
+    role: Role,
+    permission: AccessPermission,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &xcavate_whitelist::instruction::SetPermission { role, permission }.data(),
+        xcavate_whitelist::accounts::SetPermission {
+            admin_signer: *admin,
+            admin: admin_pda(admin),
+            user: *user,
+            role_account: role_pda(user, role),
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn renounce_ix(user: &Pubkey, authority: &Pubkey, role: Role) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &xcavate_whitelist::instruction::RenounceRole { role }.data(),
+        xcavate_whitelist::accounts::RenounceRole {
+            user: *user,
+            config: config_pda(),
+            authority: *authority,
+            role_account: role_pda(user, role),
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn update_authority_ix(authority: &Pubkey, new_authority: Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &xcavate_whitelist::instruction::UpdateAuthority { new_authority }.data(),
+        xcavate_whitelist::accounts::UpdateAuthority {
+            authority: *authority,
+            config: config_pda(),
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn accept_authority_ix(new_authority: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &xcavate_whitelist::instruction::AcceptAuthority {}.data(),
+        xcavate_whitelist::accounts::AcceptAuthority {
+            new_authority: *new_authority,
+            config: config_pda(),
+        }
+        .to_account_metas(None),
+    )
+}
+
+// --- send helpers ---
+
+fn process(
+    svm: &mut LiteSVM,
+    ix: Instruction,
+    payer: &Keypair,
+    signers: &[&Keypair],
+) -> Result<TransactionMetadata, FailedTransactionMetadata> {
+    // Fresh blockhash per send: otherwise two identical instructions (e.g. a
+    // double-assign) hash to the same signature and the runtime rejects the
+    // retry as `AlreadyProcessed` before the program ever runs.
+    svm.expire_blockhash();
+    let blockhash = svm.latest_blockhash();
+    let msg = Message::new_with_blockhash(&[ix], Some(&payer.pubkey()), &blockhash);
+    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), signers).unwrap();
+    svm.send_transaction(tx)
+}
+
+fn ok(svm: &mut LiteSVM, ix: Instruction, payer: &Keypair, signers: &[&Keypair]) {
+    if let Err(failed) = process(svm, ix, payer, signers) {
+        panic!("expected tx to succeed, failed with: {:?}", failed.err);
+    }
+}
+
+/// Assert the tx fails AND that the Anchor error matches `expected` (matched
+/// against the program logs, e.g. "NotAuthority", "AccountNotInitialized").
+fn fails_with(
+    svm: &mut LiteSVM,
+    ix: Instruction,
+    payer: &Keypair,
+    signers: &[&Keypair],
+    expected: &str,
+) {
+    match process(svm, ix, payer, signers) {
+        Ok(_) => panic!("expected tx to fail with `{expected}`, but it succeeded"),
+        Err(failed) => {
+            let detail = format!("{:?}\n{}", failed.err, failed.meta.logs.join("\n"));
+            assert!(
+                detail.contains(expected),
+                "expected error `{expected}`, got:\n{detail}",
+            );
+        }
+    }
+}
+
+fn funded(svm: &mut LiteSVM) -> Keypair {
+    let kp = Keypair::new();
+    svm.airdrop(&kp.pubkey(), 10_000_000_000).unwrap();
+    kp
+}
+
+// Fresh SVM with the program loaded and an initialized config whose sudo is
+// `authority`.
+fn setup() -> (LiteSVM, Keypair) {
+    let mut svm = LiteSVM::new();
+    svm.add_program(
+        pid(),
+        include_bytes!("../../../target/deploy/xcavate_whitelist.so"),
+    )
+    .unwrap();
+    let authority = funded(&mut svm);
+    bind_upgrade_authority(&mut svm, &authority.pubkey());
+    ok(
+        &mut svm,
+        init_ix(&authority.pubkey()),
+        &authority,
+        &[&authority],
+    );
+    (svm, authority)
+}
+
+// As above, plus one registered admin.
+fn setup_with_admin() -> (LiteSVM, Keypair, Keypair) {
+    let (mut svm, authority) = setup();
+    let admin = funded(&mut svm);
+    ok(
+        &mut svm,
+        add_admin_ix(&authority.pubkey(), &admin.pubkey()),
+        &authority,
+        &[&authority],
+    );
+    (svm, authority, admin)
+}
+
+fn read_config(svm: &LiteSVM) -> Config {
+    let acc = svm.get_account(&config_pda()).unwrap();
+    Config::try_deserialize(&mut &acc.data[..]).unwrap()
+}
+
+fn read_role(svm: &LiteSVM, user: &Pubkey, role: Role) -> RoleAccount {
+    let acc = svm.get_account(&role_pda(user, role)).unwrap();
+    RoleAccount::try_deserialize(&mut &acc.data[..]).unwrap()
+}
+
+// ============================ add_admin ============================
+
+#[test]
+fn add_admin_works() {
+    let (mut svm, authority) = setup();
+    let admin = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        add_admin_ix(&authority.pubkey(), &admin),
+        &authority,
+        &[&authority],
+    );
+
+    let acc = svm.get_account(&admin_pda(&admin)).unwrap();
+    let parsed = Admin::try_deserialize(&mut &acc.data[..]).unwrap();
+    assert_eq!(parsed.admin, admin);
+}
+
+#[test]
+fn add_admin_fails_for_non_authority() {
+    let (mut svm, _authority) = setup();
+    let imposter = funded(&mut svm);
+    let admin = Keypair::new().pubkey();
+    fails_with(
+        &mut svm,
+        add_admin_ix(&imposter.pubkey(), &admin),
+        &imposter,
+        &[&imposter],
+        "NotAuthority",
+    );
+}
+
+#[test]
+fn add_admin_fails_when_already_admin() {
+    let (mut svm, authority, admin) = setup_with_admin();
+    // Re-registering the same admin hits the `init` reinit guard.
+    fails_with(
+        &mut svm,
+        add_admin_ix(&authority.pubkey(), &admin.pubkey()),
+        &authority,
+        &[&authority],
+        "already in use",
+    );
+}
+
+// ============================ remove_admin ============================
+
+#[test]
+fn remove_admin_works() {
+    let (mut svm, authority, admin) = setup_with_admin();
+    ok(
+        &mut svm,
+        remove_admin_ix(&authority.pubkey(), &admin.pubkey()),
+        &authority,
+        &[&authority],
+    );
+    assert!(svm
+        .get_account(&admin_pda(&admin.pubkey()))
+        .map_or(true, |a| a.data.is_empty()));
+}
+
+#[test]
+fn remove_admin_fails_for_non_authority() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let imposter = funded(&mut svm);
+    fails_with(
+        &mut svm,
+        remove_admin_ix(&imposter.pubkey(), &admin.pubkey()),
+        &imposter,
+        &[&imposter],
+        "NotAuthority",
+    );
+}
+
+#[test]
+fn remove_admin_fails_when_not_admin() {
+    let (mut svm, authority) = setup();
+    let never_admin = Keypair::new().pubkey();
+    fails_with(
+        &mut svm,
+        remove_admin_ix(&authority.pubkey(), &never_admin),
+        &authority,
+        &[&authority],
+        "AccountNotInitialized",
+    );
+}
+
+// ============================ assign_role ============================
+
+#[test]
+fn assign_role_works() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RealEstateDeveloper),
+        &admin,
+        &[&admin],
+    );
+
+    let parsed = read_role(&svm, &user, Role::RealEstateDeveloper);
+    assert_eq!(parsed.user, user);
+    assert_eq!(parsed.role, Role::RealEstateDeveloper);
+    assert!(parsed.is_compliant());
+    // A role that was never granted has no account.
+    assert!(svm
+        .get_account(&role_pda(&user, Role::LettingAgent))
+        .map_or(true, |a| a.data.is_empty()));
+}
+
+#[test]
+fn assign_role_fails_when_already_assigned() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::LettingAgent),
+        &admin,
+        &[&admin],
+    );
+    fails_with(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::LettingAgent),
+        &admin,
+        &[&admin],
+        "already in use",
+    );
+}
+
+#[test]
+fn assign_role_fails_for_non_admin() {
+    let (mut svm, _authority) = setup();
+    let imposter = funded(&mut svm);
+    let user = Keypair::new().pubkey();
+    fails_with(
+        &mut svm,
+        assign_ix(&imposter.pubkey(), &user, Role::LettingAgent),
+        &imposter,
+        &[&imposter],
+        "AccountNotInitialized",
+    );
+}
+
+// ============================ remove_role ============================
+
+#[test]
+fn remove_role_works() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RealEstateInvestor),
+        &admin,
+        &[&admin],
+    );
+    ok(
+        &mut svm,
+        remove_role_ix(&admin.pubkey(), &user, Role::RealEstateInvestor),
+        &admin,
+        &[&admin],
+    );
+    assert!(svm
+        .get_account(&role_pda(&user, Role::RealEstateInvestor))
+        .map_or(true, |a| a.data.is_empty()));
+}
+
+#[test]
+fn remove_role_fails_for_non_admin() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RealEstateInvestor),
+        &admin,
+        &[&admin],
+    );
+    let imposter = funded(&mut svm);
+    fails_with(
+        &mut svm,
+        remove_role_ix(&imposter.pubkey(), &user, Role::RealEstateInvestor),
+        &imposter,
+        &[&imposter],
+        "AccountNotInitialized",
+    );
+}
+
+#[test]
+fn remove_role_fails_when_not_assigned() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+    fails_with(
+        &mut svm,
+        remove_role_ix(&admin.pubkey(), &user, Role::RealEstateInvestor),
+        &admin,
+        &[&admin],
+        "AccountNotInitialized",
+    );
+}
+
+// ============================ renounce_role ============================
+
+#[test]
+fn renounce_role_works() {
+    let (mut svm, authority, admin) = setup_with_admin();
+    let user = funded(&mut svm);
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user.pubkey(), Role::Lawyer),
+        &admin,
+        &[&admin],
+    );
+
+    // The holder gives the role up themselves; the rent goes to the
+    // authority, not the holder, since an admin paid it at assignment.
+    let user_before = svm.get_account(&user.pubkey()).unwrap().lamports;
+    let auth_before = svm.get_account(&authority.pubkey()).unwrap().lamports;
+    ok(
+        &mut svm,
+        renounce_ix(&user.pubkey(), &authority.pubkey(), Role::Lawyer),
+        &user,
+        &[&user],
+    );
+    assert!(svm
+        .get_account(&role_pda(&user.pubkey(), Role::Lawyer))
+        .map_or(true, |a| a.data.is_empty()));
+    assert!(svm.get_account(&authority.pubkey()).unwrap().lamports > auth_before);
+    assert!(svm.get_account(&user.pubkey()).unwrap().lamports <= user_before);
+}
+
+#[test]
+fn renounce_role_fails_when_not_assigned() {
+    let (mut svm, authority, _admin) = setup_with_admin();
+    let user = funded(&mut svm);
+    fails_with(
+        &mut svm,
+        renounce_ix(&user.pubkey(), &authority.pubkey(), Role::RealEstateInvestor),
+        &user,
+        &[&user],
+        "AccountNotInitialized",
+    );
+}
+
+#[test]
+fn renounce_role_cannot_target_another_user() {
+    let (mut svm, authority, admin) = setup_with_admin();
+    let victim = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &victim, Role::RealEstateInvestor),
+        &admin,
+        &[&admin],
+    );
+
+    // The role account seed is bound to the signer, so pointing the
+    // instruction at someone else's role account cannot derive.
+    let attacker = funded(&mut svm);
+    let ix = Instruction::new_with_bytes(
+        pid(),
+        &xcavate_whitelist::instruction::RenounceRole {
+            role: Role::RealEstateInvestor,
+        }
+        .data(),
+        xcavate_whitelist::accounts::RenounceRole {
+            user: attacker.pubkey(),
+            config: config_pda(),
+            authority: authority.pubkey(),
+            role_account: role_pda(&victim, Role::RealEstateInvestor),
+        }
+        .to_account_metas(None),
+    );
+    fails_with(&mut svm, ix, &attacker, &[&attacker], "ConstraintSeeds");
+}
+
+#[test]
+fn renounce_role_rejects_wrong_rent_destination() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = funded(&mut svm);
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user.pubkey(), Role::Lawyer),
+        &admin,
+        &[&admin],
+    );
+
+    // Redirecting the rent anywhere but the configured authority is refused.
+    fails_with(
+        &mut svm,
+        renounce_ix(&user.pubkey(), &user.pubkey(), Role::Lawyer),
+        &user,
+        &[&user],
+        "ConstraintAddress",
+    );
+}
+
+// ============================ set_permission ============================
+
+#[test]
+fn set_permission_round_trip() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RealEstateDeveloper),
+        &admin,
+        &[&admin],
+    );
+    assert!(read_role(&svm, &user, Role::RealEstateDeveloper).is_compliant());
+
+    ok(
+        &mut svm,
+        set_perm_ix(
+            &admin.pubkey(),
+            &user,
+            Role::RealEstateDeveloper,
+            AccessPermission::Revoked,
+        ),
+        &admin,
+        &[&admin],
+    );
+    assert!(!read_role(&svm, &user, Role::RealEstateDeveloper).is_compliant());
+
+    ok(
+        &mut svm,
+        set_perm_ix(
+            &admin.pubkey(),
+            &user,
+            Role::RealEstateDeveloper,
+            AccessPermission::Compliant,
+        ),
+        &admin,
+        &[&admin],
+    );
+    assert!(read_role(&svm, &user, Role::RealEstateDeveloper).is_compliant());
+}
+
+#[test]
+fn set_permission_fails_when_role_not_assigned() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RealEstateDeveloper),
+        &admin,
+        &[&admin],
+    );
+    // Different, unassigned role -> no account to mutate.
+    fails_with(
+        &mut svm,
+        set_perm_ix(
+            &admin.pubkey(),
+            &user,
+            Role::LettingAgent,
+            AccessPermission::Revoked,
+        ),
+        &admin,
+        &[&admin],
+        "AccountNotInitialized",
+    );
+}
+
+#[test]
+fn set_permission_fails_for_non_admin() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RealEstateDeveloper),
+        &admin,
+        &[&admin],
+    );
+    let imposter = funded(&mut svm);
+    fails_with(
+        &mut svm,
+        set_perm_ix(
+            &imposter.pubkey(),
+            &user,
+            Role::RealEstateDeveloper,
+            AccessPermission::Revoked,
+        ),
+        &imposter,
+        &[&imposter],
+        "AccountNotInitialized",
+    );
+}
+
+#[test]
+fn set_permission_fails_when_already_set() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RealEstateDeveloper),
+        &admin,
+        &[&admin],
+    );
+    ok(
+        &mut svm,
+        set_perm_ix(
+            &admin.pubkey(),
+            &user,
+            Role::RealEstateDeveloper,
+            AccessPermission::Revoked,
+        ),
+        &admin,
+        &[&admin],
+    );
+    // Revoking again is a no-op the program rejects.
+    fails_with(
+        &mut svm,
+        set_perm_ix(
+            &admin.pubkey(),
+            &user,
+            Role::RealEstateDeveloper,
+            AccessPermission::Revoked,
+        ),
+        &admin,
+        &[&admin],
+        "PermissionAlreadySet",
+    );
+}
+
+// ============================ update_authority ============================
+
+#[test]
+fn update_authority_is_two_step() {
+    let (mut svm, authority) = setup();
+    let new_authority = funded(&mut svm);
+
+    // Proposing alone hands over nothing: the current authority stays in
+    // power and the proposal is only recorded as pending.
+    ok(
+        &mut svm,
+        update_authority_ix(&authority.pubkey(), new_authority.pubkey()),
+        &authority,
+        &[&authority],
+    );
+    let config = read_config(&svm);
+    assert_eq!(config.authority, authority.pubkey());
+    assert_eq!(config.pending_authority, Some(new_authority.pubkey()));
+    let admin = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        add_admin_ix(&authority.pubkey(), &admin),
+        &authority,
+        &[&authority],
+    );
+
+    // Accepting completes the handover; power switches atomically.
+    ok(
+        &mut svm,
+        accept_authority_ix(&new_authority.pubkey()),
+        &new_authority,
+        &[&new_authority],
+    );
+    let config = read_config(&svm);
+    assert_eq!(config.authority, new_authority.pubkey());
+    assert_eq!(config.pending_authority, None);
+    let admin2 = Keypair::new().pubkey();
+    fails_with(
+        &mut svm,
+        add_admin_ix(&authority.pubkey(), &admin2),
+        &authority,
+        &[&authority],
+        "NotAuthority",
+    );
+    ok(
+        &mut svm,
+        add_admin_ix(&new_authority.pubkey(), &admin2),
+        &new_authority,
+        &[&new_authority],
+    );
+}
+
+#[test]
+fn accept_authority_fails_without_matching_proposal() {
+    let (mut svm, authority) = setup();
+
+    // Nothing pending yet.
+    let imposter = funded(&mut svm);
+    fails_with(
+        &mut svm,
+        accept_authority_ix(&imposter.pubkey()),
+        &imposter,
+        &[&imposter],
+        "NotPendingAuthority",
+    );
+
+    // A proposal for someone else doesn't let a third party accept.
+    let proposed = funded(&mut svm);
+    ok(
+        &mut svm,
+        update_authority_ix(&authority.pubkey(), proposed.pubkey()),
+        &authority,
+        &[&authority],
+    );
+    fails_with(
+        &mut svm,
+        accept_authority_ix(&imposter.pubkey()),
+        &imposter,
+        &[&imposter],
+        "NotPendingAuthority",
+    );
+}
+
+#[test]
+fn update_authority_reproposal_overwrites_pending() {
+    let (mut svm, authority) = setup();
+    let first = funded(&mut svm);
+    let second = funded(&mut svm);
+    ok(
+        &mut svm,
+        update_authority_ix(&authority.pubkey(), first.pubkey()),
+        &authority,
+        &[&authority],
+    );
+    ok(
+        &mut svm,
+        update_authority_ix(&authority.pubkey(), second.pubkey()),
+        &authority,
+        &[&authority],
+    );
+
+    // The stale proposal is dead; only the latest can accept.
+    fails_with(
+        &mut svm,
+        accept_authority_ix(&first.pubkey()),
+        &first,
+        &[&first],
+        "NotPendingAuthority",
+    );
+    ok(
+        &mut svm,
+        accept_authority_ix(&second.pubkey()),
+        &second,
+        &[&second],
+    );
+    assert_eq!(read_config(&svm).authority, second.pubkey());
+}
+
+#[test]
+fn update_authority_fails_for_non_authority() {
+    let (mut svm, _authority) = setup();
+    let imposter = funded(&mut svm);
+    fails_with(
+        &mut svm,
+        update_authority_ix(&imposter.pubkey(), imposter.pubkey()),
+        &imposter,
+        &[&imposter],
+        "NotAuthority",
+    );
+}
+
+#[test]
+fn update_authority_fails_for_zero_address() {
+    let (mut svm, authority) = setup();
+    // Handing the sudo authority to the zero address would brick the registry.
+    fails_with(
+        &mut svm,
+        update_authority_ix(&authority.pubkey(), Pubkey::default()),
+        &authority,
+        &[&authority],
+        "InvalidAuthority",
+    );
+}
+
+// ============================ singleton / role isolation ============================
+
+#[test]
+fn initialize_config_fails_on_double_init() {
+    let (mut svm, authority) = setup();
+    // The config is a singleton PDA; a second init hits the existing account.
+    fails_with(
+        &mut svm,
+        init_ix(&authority.pubkey()),
+        &authority,
+        &[&authority],
+        "already in use",
+    );
+}
+
+#[test]
+fn assign_multiple_distinct_roles_coexist() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+
+    // Two different roles for one user live in independent PDAs (seed-byte isolation).
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RegionalOperator),
+        &admin,
+        &[&admin],
+    );
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RealEstateDeveloper),
+        &admin,
+        &[&admin],
+    );
+
+    assert_eq!(
+        read_role(&svm, &user, Role::RegionalOperator).role,
+        Role::RegionalOperator
+    );
+    assert_eq!(
+        read_role(&svm, &user, Role::RealEstateDeveloper).role,
+        Role::RealEstateDeveloper
+    );
+}
+
+#[test]
+fn reassign_role_after_removal() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RealEstateDeveloper),
+        &admin,
+        &[&admin],
+    );
+    ok(
+        &mut svm,
+        remove_role_ix(&admin.pubkey(), &user, Role::RealEstateDeveloper),
+        &admin,
+        &[&admin],
+    );
+    // The PDA was closed; assigning again must re-create it cleanly.
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RealEstateDeveloper),
+        &admin,
+        &[&admin],
+    );
+    assert_eq!(
+        read_role(&svm, &user, Role::RealEstateDeveloper).role,
+        Role::RealEstateDeveloper
+    );
+}
+
+#[test]
+fn removed_admin_loses_power() {
+    let (mut svm, authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+
+    ok(
+        &mut svm,
+        remove_admin_ix(&authority.pubkey(), &admin.pubkey()),
+        &authority,
+        &[&authority],
+    );
+    // With the Admin PDA closed, the ex-admin's account no longer resolves.
+    fails_with(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RealEstateDeveloper),
+        &admin,
+        &[&admin],
+        "AccountNotInitialized",
+    );
+}
+
+// ============================ initialize gating ============================
+
+#[test]
+fn initialize_config_requires_upgrade_authority() {
+    let mut svm = LiteSVM::new();
+    svm.add_program(
+        pid(),
+        include_bytes!("../../../target/deploy/xcavate_whitelist.so"),
+    )
+    .unwrap();
+    let deployer = funded(&mut svm);
+    bind_upgrade_authority(&mut svm, &deployer.pubkey());
+
+    // Someone other than the deployer cannot claim the config.
+    let imposter = funded(&mut svm);
+    fails_with(
+        &mut svm,
+        init_ix(&imposter.pubkey()),
+        &imposter,
+        &[&imposter],
+        "NotUpgradeAuthority",
+    );
+
+    // The deployer can.
+    ok(
+        &mut svm,
+        init_ix(&deployer.pubkey()),
+        &deployer,
+        &[&deployer],
+    );
+}
+
+#[test]
+fn initialize_config_rejects_spoofed_program_data() {
+    // The program<->program_data binding is what stops an attacker supplying a
+    // fabricated ProgramData that names themselves as upgrade authority to seize
+    // the singleton config the other programs trust cross-program.
+    let mut svm = LiteSVM::new();
+    svm.add_program(
+        pid(),
+        include_bytes!("../../../target/deploy/xcavate_whitelist.so"),
+    )
+    .unwrap();
+
+    // Forge a well-formed ProgramData at a foreign address whose upgrade
+    // authority is the imposter, so it clears the authority-equals-signer check.
+    let imposter = funded(&mut svm);
+    let fake_pd = Pubkey::new_unique();
+    let mut acc = svm.get_account(&program_data_pda()).unwrap();
+    acc.data[12] = 1;
+    acc.data[13..45].copy_from_slice(imposter.pubkey().as_ref());
+    svm.set_account(fake_pd, acc).unwrap();
+
+    // It isn't THIS program's data account, so the binding rejects it even though
+    // its recorded authority matches the signer.
+    let ix = Instruction::new_with_bytes(
+        pid(),
+        &xcavate_whitelist::instruction::InitializeConfig {}.data(),
+        xcavate_whitelist::accounts::InitializeConfig {
+            authority: imposter.pubkey(),
+            program: pid(),
+            program_data: fake_pd,
+            config: config_pda(),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    );
+    fails_with(&mut svm, ix, &imposter, &[&imposter], "NotUpgradeAuthority");
+}
+
+// ============================ seed-byte stability ============================
+
+#[test]
+fn role_seed_bytes_are_stable() {
+    // PDA derivations depend on these exact bytes; a reorder of the enum must
+    // never change them. If this test fails, existing on-chain RoleAccounts
+    // would become unreachable.
+    assert_eq!(Role::RegionalOperator.seed_byte(), 0);
+    assert_eq!(Role::RealEstateInvestor.seed_byte(), 1);
+    assert_eq!(Role::RealEstateDeveloper.seed_byte(), 2);
+    assert_eq!(Role::Lawyer.seed_byte(), 3);
+    assert_eq!(Role::LettingAgent.seed_byte(), 4);
+    assert_eq!(Role::SpvConfirmation.seed_byte(), 5);
+}
+
+#[test]
+fn assign_spv_confirmation_role_works() {
+    let (mut svm, _authority, admin) = setup_with_admin();
+    let user = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::SpvConfirmation),
+        &admin,
+        &[&admin],
+    );
+    let parsed = read_role(&svm, &user, Role::SpvConfirmation);
+    assert_eq!(parsed.role, Role::SpvConfirmation);
+    assert!(parsed.is_compliant());
+}
+
+#[test]
+fn readd_admin_after_removal() {
+    let (mut svm, authority, admin) = setup_with_admin();
+    ok(
+        &mut svm,
+        remove_admin_ix(&authority.pubkey(), &admin.pubkey()),
+        &authority,
+        &[&authority],
+    );
+    // The Admin PDA was closed; registering again must re-create it cleanly.
+    ok(
+        &mut svm,
+        add_admin_ix(&authority.pubkey(), &admin.pubkey()),
+        &authority,
+        &[&authority],
+    );
+    let user = Keypair::new().pubkey();
+    ok(
+        &mut svm,
+        assign_ix(&admin.pubkey(), &user, Role::RealEstateInvestor),
+        &admin,
+        &[&admin],
+    );
+}
