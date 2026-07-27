@@ -20,7 +20,7 @@ pub const REGION_STATE_SEED: &[u8] = b"region_state";
 #[constant]
 pub const VOTE_SEED: &[u8] = b"vote";
 
-/// PDA seed for the protocol's XCAV escrow vault (holds all staked governance
+/// PDA seed for the protocol's XCAV vault (holds all staked governance
 /// tokens: proposal bonds, vote locks, and region collateral).
 #[constant]
 pub const VAULT_SEED: &[u8] = b"vault";

@@ -91,7 +91,7 @@ fn add_admin_ix(authority: &Pubkey, new_admin: &Pubkey) -> Instruction {
 fn remove_admin_ix(authority: &Pubkey, target: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &xcavate_whitelist::instruction::RemoveAdmin {}.data(),
+        &xcavate_whitelist::instruction::RemoveAdmin { admin_key: *target }.data(),
         xcavate_whitelist::accounts::RemoveAdmin {
             authority: *authority,
             config: config_pda(),
@@ -116,7 +116,7 @@ fn assign_ix(admin: &Pubkey, user: &Pubkey, role: Role) -> Instruction {
     )
 }
 
-fn remove_role_ix(admin: &Pubkey, user: &Pubkey, role: Role) -> Instruction {
+fn remove_role_ix(admin: &Pubkey, user: &Pubkey, role: Role, rent_payer: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &xcavate_whitelist::instruction::RemoveRole { role }.data(),
@@ -124,6 +124,7 @@ fn remove_role_ix(admin: &Pubkey, user: &Pubkey, role: Role) -> Instruction {
             admin_signer: *admin,
             admin: admin_pda(admin),
             user: *user,
+            rent_payer: *rent_payer,
             role_account: role_pda(user, role),
         }
         .to_account_metas(None),
@@ -149,14 +150,13 @@ fn set_perm_ix(
     )
 }
 
-fn renounce_ix(user: &Pubkey, authority: &Pubkey, role: Role) -> Instruction {
+fn renounce_ix(user: &Pubkey, rent_payer: &Pubkey, role: Role) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
         &xcavate_whitelist::instruction::RenounceRole { role }.data(),
         xcavate_whitelist::accounts::RenounceRole {
             user: *user,
-            config: config_pda(),
-            authority: *authority,
+            rent_payer: *rent_payer,
             role_account: role_pda(user, role),
         }
         .to_account_metas(None),
@@ -438,7 +438,12 @@ fn remove_role_works() {
     );
     ok(
         &mut svm,
-        remove_role_ix(&admin.pubkey(), &user, Role::RealEstateInvestor),
+        remove_role_ix(
+            &admin.pubkey(),
+            &user,
+            Role::RealEstateInvestor,
+            &admin.pubkey(),
+        ),
         &admin,
         &[&admin],
     );
@@ -460,7 +465,12 @@ fn remove_role_fails_for_non_admin() {
     let imposter = funded(&mut svm);
     fails_with(
         &mut svm,
-        remove_role_ix(&imposter.pubkey(), &user, Role::RealEstateInvestor),
+        remove_role_ix(
+            &imposter.pubkey(),
+            &user,
+            Role::RealEstateInvestor,
+            &admin.pubkey(),
+        ),
         &imposter,
         &[&imposter],
         "AccountNotInitialized",
@@ -473,7 +483,12 @@ fn remove_role_fails_when_not_assigned() {
     let user = Keypair::new().pubkey();
     fails_with(
         &mut svm,
-        remove_role_ix(&admin.pubkey(), &user, Role::RealEstateInvestor),
+        remove_role_ix(
+            &admin.pubkey(),
+            &user,
+            Role::RealEstateInvestor,
+            &admin.pubkey(),
+        ),
         &admin,
         &[&admin],
         "AccountNotInitialized",
@@ -484,7 +499,7 @@ fn remove_role_fails_when_not_assigned() {
 
 #[test]
 fn renounce_role_works() {
-    let (mut svm, authority, admin) = setup_with_admin();
+    let (mut svm, _authority, admin) = setup_with_admin();
     let user = funded(&mut svm);
     ok(
         &mut svm,
@@ -493,20 +508,20 @@ fn renounce_role_works() {
         &[&admin],
     );
 
-    // The holder gives the role up themselves; the rent goes to the
-    // authority, not the holder, since an admin paid it at assignment.
+    // The holder gives the role up themselves; the rent goes back to the
+    // admin who paid it at assignment, not the holder.
     let user_before = svm.get_account(&user.pubkey()).unwrap().lamports;
-    let auth_before = svm.get_account(&authority.pubkey()).unwrap().lamports;
+    let admin_before = svm.get_account(&admin.pubkey()).unwrap().lamports;
     ok(
         &mut svm,
-        renounce_ix(&user.pubkey(), &authority.pubkey(), Role::Lawyer),
+        renounce_ix(&user.pubkey(), &admin.pubkey(), Role::Lawyer),
         &user,
         &[&user],
     );
     assert!(svm
         .get_account(&role_pda(&user.pubkey(), Role::Lawyer))
         .is_none_or(|a| a.data.is_empty()));
-    assert!(svm.get_account(&authority.pubkey()).unwrap().lamports > auth_before);
+    assert!(svm.get_account(&admin.pubkey()).unwrap().lamports > admin_before);
     assert!(svm.get_account(&user.pubkey()).unwrap().lamports <= user_before);
 }
 
@@ -529,7 +544,7 @@ fn renounce_role_fails_when_not_assigned() {
 
 #[test]
 fn renounce_role_cannot_target_another_user() {
-    let (mut svm, authority, admin) = setup_with_admin();
+    let (mut svm, _authority, admin) = setup_with_admin();
     let victim = Keypair::new().pubkey();
     ok(
         &mut svm,
@@ -549,8 +564,7 @@ fn renounce_role_cannot_target_another_user() {
         .data(),
         xcavate_whitelist::accounts::RenounceRole {
             user: attacker.pubkey(),
-            config: config_pda(),
-            authority: authority.pubkey(),
+            rent_payer: admin.pubkey(),
             role_account: role_pda(&victim, Role::RealEstateInvestor),
         }
         .to_account_metas(None),
@@ -569,13 +583,13 @@ fn renounce_role_rejects_wrong_rent_destination() {
         &[&admin],
     );
 
-    // Redirecting the rent anywhere but the configured authority is refused.
+    // Redirecting the rent anywhere but the recorded payer is refused.
     fails_with(
         &mut svm,
         renounce_ix(&user.pubkey(), &user.pubkey(), Role::Lawyer),
         &user,
         &[&user],
-        "ConstraintAddress",
+        "WrongRentPayer",
     );
 }
 
@@ -907,7 +921,12 @@ fn reassign_role_after_removal() {
     );
     ok(
         &mut svm,
-        remove_role_ix(&admin.pubkey(), &user, Role::RealEstateDeveloper),
+        remove_role_ix(
+            &admin.pubkey(),
+            &user,
+            Role::RealEstateDeveloper,
+            &admin.pubkey(),
+        ),
         &admin,
         &[&admin],
     );

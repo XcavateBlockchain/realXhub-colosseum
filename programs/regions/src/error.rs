@@ -56,10 +56,7 @@ pub enum RegionsError {
     /// Arithmetic overflow.
     #[msg("Arithmetic overflow")]
     Overflow,
-    /// A payout recipient's token account is required on this path.
-    #[msg("Recipient token account is required")]
-    MissingRecipientToken,
-    /// The mint carries a token extension the escrow accounting cannot support.
+    /// The mint carries a token extension the vault accounting cannot support.
     #[msg("Unsupported token extension on mint")]
     UnsupportedMintExtension,
     /// The signer is not the program's upgrade authority.
@@ -77,4 +74,16 @@ pub enum RegionsError {
     /// The postcode is empty, too long, or not uppercase alphanumeric ASCII.
     #[msg("Invalid postcode")]
     InvalidPostcode,
+    /// The mint has an authority that could lock vaulted funds.
+    #[msg("Unsupported mint authority")]
+    UnsupportedMintAuthority,
+    /// The computed deposit is above the caller's stated maximum.
+    #[msg("Deposit exceeds the caller's maximum")]
+    DepositTooHigh,
+    /// The operator seat is open; locations are locked until it is filled.
+    #[msg("Operator seat is open")]
+    SeatOpen,
+    /// The vote landed inside the minimum hold window before expiry.
+    #[msg("Too close to the proposal expiry to vote")]
+    VoteTooLate,
 }

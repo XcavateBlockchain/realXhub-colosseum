@@ -35,7 +35,7 @@ pub struct ProposeNewRegion<'info> {
     )]
     pub proposer_token: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// The protocol's XCAV escrow vault.
+    /// The protocol's XCAV vault.
     #[account(
         mut,
         seeds = [VAULT_SEED],
@@ -87,7 +87,11 @@ pub struct ProposeNewRegion<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn propose_new_region_handler(ctx: Context<ProposeNewRegion>, region_id: u16) -> Result<()> {
+pub fn propose_new_region_handler(
+    ctx: Context<ProposeNewRegion>,
+    region_id: u16,
+    max_deposit: u64,
+) -> Result<()> {
     require!(
         RegionIdentifier::from_code(region_id).is_some(),
         RegionsError::InvalidRegion
@@ -96,6 +100,9 @@ pub fn propose_new_region_handler(ctx: Context<ProposeNewRegion>, region_id: u16
     let clock = Clock::get()?;
     let proposal_id = ctx.accounts.config.proposal_counter;
     let deposit = operator_bond(ctx.accounts.xcav_mint.supply).ok_or(RegionsError::BondTooSmall)?;
+    // The bond is computed from live supply; the caller caps what they are
+    // willing to pay so state changes can't reprice their signed transaction.
+    require!(deposit <= max_deposit, RegionsError::DepositTooHigh);
     let voting_period = ctx.accounts.config.voting_period;
 
     // Lock the proposer's XCAV bond in the vault.
@@ -115,6 +122,10 @@ pub fn propose_new_region_handler(ctx: Context<ProposeNewRegion>, region_id: u16
     proposal.region_id = region_id;
     proposal.created_at = clock.unix_timestamp;
     proposal.expiry = clock.unix_timestamp.saturating_add(voting_period);
+    proposal.vote_cutoff = proposal
+        .expiry
+        .checked_sub(ctx.accounts.config.min_vote_hold)
+        .ok_or(RegionsError::Overflow)?;
     proposal.yes_power = 0;
     proposal.no_power = 0;
     proposal.abstain_power = 0;

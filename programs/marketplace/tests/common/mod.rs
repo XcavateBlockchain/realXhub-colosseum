@@ -31,7 +31,10 @@ use solana_transaction::versioned::VersionedTransaction;
 
 use anchor_lang::{AnchorSerialize, Discriminator};
 use marketplace::instructions::ConfigParams;
-use marketplace::{CONFIG_SEED, LAWYER_SEED, LISTING_SEED, PROPERTY_SEED, VAULT_SEED};
+use marketplace::{
+    CONFIG_SEED, LAWYER_SEED, LISTING_SEED, MINT_AUTH_SEED, PROPERTY_SEED, PROPERTY_VAULT_SEED,
+    SHARE_MINT_SEED, VAULT_SEED,
+};
 
 pub const SYS: Pubkey = anchor_lang::system_program::ID;
 pub const DECIMALS: u8 = 9;
@@ -84,6 +87,82 @@ pub fn location_pda(region_id: u16, postcode: &[u8]) -> Pubkey {
     )
     .0
 }
+pub fn share_mint_pda(asset_id: u64) -> Pubkey {
+    Pubkey::find_program_address(&[SHARE_MINT_SEED, &asset_id.to_le_bytes()], &mid()).0
+}
+pub fn mint_auth_pda(asset_id: u64) -> Pubkey {
+    Pubkey::find_program_address(&[MINT_AUTH_SEED, &asset_id.to_le_bytes()], &mid()).0
+}
+pub fn property_vault_pda(asset_id: u64) -> Pubkey {
+    Pubkey::find_program_address(&[PROPERTY_VAULT_SEED, &asset_id.to_le_bytes()], &mid()).0
+}
+/// The property vault's associated token account for the property's share mint
+/// (Token-2022 derivation).
+pub fn vault_share_account(asset_id: u64) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            property_vault_pda(asset_id).as_ref(),
+            anchor_spl::token_2022::ID.as_ref(),
+            share_mint_pda(asset_id).as_ref(),
+        ],
+        &anchor_spl::associated_token::ID,
+    )
+    .0
+}
+
+pub fn position_pda(listing_id: u64, investor: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            marketplace::POSITION_SEED,
+            &listing_id.to_le_bytes(),
+            investor.as_ref(),
+        ],
+        &mid(),
+    )
+    .0
+}
+pub fn holding_pda(asset_id: u64, owner: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            marketplace::SHARE_SEED,
+            &asset_id.to_le_bytes(),
+            owner.as_ref(),
+        ],
+        &mid(),
+    )
+    .0
+}
+pub fn listing_vault_pda(listing_id: u64) -> Pubkey {
+    Pubkey::find_program_address(
+        &[marketplace::LISTING_VAULT_SEED, &listing_id.to_le_bytes()],
+        &mid(),
+    )
+    .0
+}
+/// The listing vault's associated tGBP account (classic-token derivation).
+pub fn listing_payment_ata(listing_id: u64) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            listing_vault_pda(listing_id).as_ref(),
+            TOKEN_PROGRAM_ID.as_ref(),
+            tgbp_mint().as_ref(),
+        ],
+        &anchor_spl::associated_token::ID,
+    )
+    .0
+}
+/// An investor's associated share account (Token-2022 derivation).
+pub fn investor_share_ata(asset_id: u64, investor: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            investor.as_ref(),
+            anchor_spl::token_2022::ID.as_ref(),
+            share_mint_pda(asset_id).as_ref(),
+        ],
+        &anchor_spl::associated_token::ID,
+    )
+    .0
+}
 
 pub fn roles_config() -> Pubkey {
     Pubkey::find_program_address(&[xcavate_whitelist::CONFIG_SEED], &roles_id()).0
@@ -115,6 +194,18 @@ pub fn tgbp_mint() -> Pubkey {
     Pubkey::new_from_array([6u8; 32])
 }
 
+/// A second accepted GBP stablecoin at 6 decimals, so the price-rescaling
+/// paths run at a real factor in tests.
+pub fn gbp6_mint() -> Pubkey {
+    Pubkey::new_from_array([5u8; 32])
+}
+
+/// The sponsor wallet fronting investor rent. Deterministic, so
+/// `default_params` can name it as the rent collector.
+pub fn sponsor() -> Keypair {
+    Keypair::new_from_array([42u8; 32])
+}
+
 /// Deterministic XCAV token account for an owner. Not a real ATA; the program
 /// only checks the mint and authority, so any token account works.
 pub fn token_acc(owner: &Pubkey) -> Pubkey {
@@ -122,17 +213,25 @@ pub fn token_acc(owner: &Pubkey) -> Pubkey {
 }
 
 pub fn set_mint(svm: &mut LiteSVM) {
+    set_mint_at(svm, xcav_mint(), DECIMALS);
+    // The payment mints are real mints too: config initialization proves
+    // every accepted entry exists and passes the mint guard.
+    set_mint_at(svm, tgbp_mint(), 9);
+    set_mint_at(svm, gbp6_mint(), 6);
+}
+
+pub fn set_mint_at(svm: &mut LiteSVM, address: Pubkey, decimals: u8) {
     let mint = SplMint {
         mint_authority: COption::None,
         supply: 1_000_000_000_000,
-        decimals: DECIMALS,
+        decimals,
         is_initialized: true,
         freeze_authority: COption::None,
     };
     let mut data = vec![0u8; SplMint::LEN];
     mint.pack_into_slice(&mut data);
     svm.set_account(
-        xcav_mint(),
+        address,
         Account {
             lamports: 100_000_000,
             data,
@@ -144,9 +243,65 @@ pub fn set_mint(svm: &mut LiteSVM) {
     .unwrap();
 }
 
+/// Seed a classic mint that still has an account-state authority; the mint
+/// guard must refuse it.
+pub fn set_mint_with_lock_authority(svm: &mut LiteSVM, address: Pubkey) {
+    let mint = SplMint {
+        mint_authority: COption::None,
+        supply: 1_000_000_000_000,
+        decimals: DECIMALS,
+        is_initialized: true,
+        freeze_authority: COption::Some(Pubkey::new_from_array([13u8; 32])),
+    };
+    let mut data = vec![0u8; SplMint::LEN];
+    mint.pack_into_slice(&mut data);
+    svm.set_account(
+        address,
+        Account {
+            lamports: 100_000_000,
+            data,
+            owner: TOKEN_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
+
+/// Seed a fee-bearing Token-2022 mint (transfer-fee TLV entry); the mint guard
+/// must refuse it as a payment mint.
+pub fn set_fee_bearing_mint(svm: &mut LiteSVM, address: Pubkey) {
+    let mut data = vec![0u8; 166 + 4 + 108];
+    data[45] = 1; // is_initialized
+    data[165] = 1; // account type: mint
+    data[166..168].copy_from_slice(&1u16.to_le_bytes()); // transfer fee config
+    data[168..170].copy_from_slice(&108u16.to_le_bytes());
+    svm.set_account(
+        address,
+        Account {
+            lamports: 100_000_000,
+            data,
+            owner: anchor_spl::token_2022::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
+
 pub fn set_token_account(svm: &mut LiteSVM, address: Pubkey, owner: &Pubkey, amount: u64) {
+    set_token_account_for(svm, xcav_mint(), address, owner, amount);
+}
+
+pub fn set_token_account_for(
+    svm: &mut LiteSVM,
+    mint: Pubkey,
+    address: Pubkey,
+    owner: &Pubkey,
+    amount: u64,
+) {
     let acc = SplAccount {
-        mint: xcav_mint(),
+        mint,
         owner: *owner,
         amount,
         delegate: COption::None,
@@ -172,6 +327,29 @@ pub fn set_token_account(svm: &mut LiteSVM, address: Pubkey, owner: &Pubkey, amo
 
 pub fn give_xcav(svm: &mut LiteSVM, owner: &Pubkey, amount: u64) {
     set_token_account(svm, token_acc(owner), owner, amount);
+}
+
+/// Deterministic tGBP token account for an owner.
+pub fn tgbp_acc(owner: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"tgbp_token", owner.as_ref()], &mid()).0
+}
+
+pub fn give_tgbp(svm: &mut LiteSVM, owner: &Pubkey, amount: u64) {
+    set_token_account_for(svm, tgbp_mint(), tgbp_acc(owner), owner, amount);
+}
+
+pub fn tgbp_balance(svm: &LiteSVM, owner: &Pubkey) -> u64 {
+    let acc = svm.get_account(&tgbp_acc(owner)).unwrap();
+    SplAccount::unpack(&acc.data).unwrap().amount
+}
+
+/// Deterministic 6-decimal-GBP token account for an owner.
+pub fn gbp6_acc(owner: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"gbp6_token", owner.as_ref()], &mid()).0
+}
+
+pub fn give_gbp6(svm: &mut LiteSVM, owner: &Pubkey, amount: u64) {
+    set_token_account_for(svm, gbp6_mint(), gbp6_acc(owner), owner, amount);
 }
 
 pub fn xcav_balance(svm: &LiteSVM, owner: &Pubkey) -> u64 {
@@ -312,8 +490,8 @@ pub fn roles_assign_ix(admin: &Pubkey, user: &Pubkey, role: Role) -> Instruction
 pub fn default_params() -> ConfigParams {
     ConfigParams {
         treasury: Pubkey::new_from_array([9u8; 32]),
-        rent_collector: Pubkey::new_from_array([8u8; 32]),
-        accepted_payment_mints: vec![tgbp_mint()],
+        rent_collector: sponsor().pubkey(),
+        accepted_payment_mints: vec![tgbp_mint(), gbp6_mint()],
         listing_deposit: LISTING_DEPOSIT,
         lawyer_deposit: LAWYER_DEPOSIT,
         min_property_shares: 1,
@@ -332,33 +510,50 @@ pub fn init_ix(authority: &Pubkey) -> Instruction {
 }
 
 pub fn init_ix_with(authority: &Pubkey, params: ConfigParams) -> Instruction {
+    let mut accounts = marketplace::accounts::InitializeConfig {
+        authority: *authority,
+        program: mid(),
+        program_data: program_data_pda(&mid()),
+        config: marketplace_config(),
+        xcav_mint: xcav_mint(),
+        vault: vault(),
+        token_program: TOKEN_PROGRAM_ID,
+        system_program: SYS,
+    }
+    .to_account_metas(None);
+    // Every accepted payment mint rides along as a remaining account.
+    accounts.extend(payment_mint_metas(&params));
     Instruction::new_with_bytes(
         mid(),
         &marketplace::instruction::InitializeConfig { params }.data(),
-        marketplace::accounts::InitializeConfig {
-            authority: *authority,
-            program: mid(),
-            program_data: program_data_pda(&mid()),
-            config: marketplace_config(),
-            xcav_mint: xcav_mint(),
-            vault: vault(),
-            token_program: TOKEN_PROGRAM_ID,
-            system_program: SYS,
-        }
-        .to_account_metas(None),
+        accounts,
     )
 }
 
 pub fn update_config_ix(authority: &Pubkey, params: ConfigParams) -> Instruction {
+    let mut accounts = marketplace::accounts::UpdateConfig {
+        authority: *authority,
+        config: marketplace_config(),
+    }
+    .to_account_metas(None);
+    accounts.extend(payment_mint_metas(&params));
     Instruction::new_with_bytes(
         mid(),
         &marketplace::instruction::UpdateConfig { params }.data(),
-        marketplace::accounts::UpdateConfig {
-            authority: *authority,
-            config: marketplace_config(),
-        }
-        .to_account_metas(None),
+        accounts,
     )
+}
+
+fn payment_mint_metas(
+    params: &ConfigParams,
+) -> Vec<anchor_lang::solana_program::instruction::AccountMeta> {
+    params
+        .accepted_payment_mints
+        .iter()
+        .map(|mint| {
+            anchor_lang::solana_program::instruction::AccountMeta::new_readonly(*mint, false)
+        })
+        .collect()
 }
 
 pub fn update_authority_ix(authority: &Pubkey, new_authority: &Pubkey) -> Instruction {
@@ -400,6 +595,7 @@ pub fn seed_region(svm: &mut LiteSVM, region_id: u16, owner: &Pubkey) {
         region_id,
         owner: *owner,
         collateral: 0,
+        location_collateral: 0,
         next_owner_change: i64::MAX,
         listing_duration: 100_000,
         tax_bps: 300,
@@ -431,6 +627,7 @@ pub fn seed_location(svm: &mut LiteSVM, region_id: u16, postcode: &[u8]) {
     let location = regions::state::Location {
         region_id,
         postcode: postcode.to_vec(),
+        deposit: 50_000_000,
         bump,
     };
     let mut data = regions::state::Location::DISCRIMINATOR.to_vec();
@@ -468,6 +665,27 @@ pub fn list_property_ix(
     share_price: u64,
     share_amount: u32,
 ) -> Instruction {
+    list_property_ix_capped(
+        developer,
+        listing_id,
+        region_id,
+        postcode,
+        share_price,
+        share_amount,
+        u64::MAX,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn list_property_ix_capped(
+    developer: &Pubkey,
+    listing_id: u64,
+    region_id: u16,
+    postcode: &[u8],
+    share_price: u64,
+    share_amount: u32,
+    max_deposit: u64,
+) -> Instruction {
     Instruction::new_with_bytes(
         mid(),
         &marketplace::instruction::ListProperty {
@@ -476,6 +694,7 @@ pub fn list_property_ix(
             share_price,
             share_amount,
             tax_paid_by_developer: false,
+            max_deposit,
         }
         .data(),
         marketplace::accounts::ListProperty {
@@ -508,6 +727,19 @@ pub fn list_ix(developer: &Pubkey, listing_id: u64) -> Instruction {
     )
 }
 
+/// `list_ix` with a caller-supplied deposit cap.
+pub fn list_ix_capped(developer: &Pubkey, listing_id: u64, max_deposit: u64) -> Instruction {
+    list_property_ix_capped(
+        developer,
+        listing_id,
+        1,
+        POSTCODE,
+        SHARE_PRICE,
+        SHARE_AMOUNT,
+        max_deposit,
+    )
+}
+
 pub fn upgrade_ix(developer: &Pubkey, listing_id: u64, new_price: u64) -> Instruction {
     Instruction::new_with_bytes(
         mid(),
@@ -525,6 +757,130 @@ pub fn upgrade_ix(developer: &Pubkey, listing_id: u64, new_price: u64) -> Instru
     )
 }
 
+pub fn init_assets_ix(developer: &Pubkey, listing_id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::InitPropertyAssets { listing_id }.data(),
+        marketplace::accounts::InitPropertyAssets {
+            developer: *developer,
+            developer_role: role_pda(developer, Role::RealEstateDeveloper),
+            listing: listing_pda(listing_id),
+            property: property_pda(listing_id),
+            share_mint: share_mint_pda(listing_id),
+            mint_auth: mint_auth_pda(listing_id),
+            property_vault: property_vault_pda(listing_id),
+            vault_share_account: vault_share_account(listing_id),
+            token_program: anchor_spl::token_2022::ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// A SOL-funded keypair with the RealEstateInvestor role and a tGBP balance.
+pub fn new_investor(svm: &mut LiteSVM, admin: &Keypair) -> Keypair {
+    let kp = funded(svm);
+    give_tgbp(svm, &kp.pubkey(), 1_000_000_000_000);
+    ok(
+        svm,
+        roles_assign_ix(&admin.pubkey(), &kp.pubkey(), Role::RealEstateInvestor),
+        admin,
+        &[admin],
+    );
+    kp
+}
+
+pub fn buy_ix(
+    investor: &Pubkey,
+    payer: &Pubkey,
+    listing_id: u64,
+    amount: u32,
+    max_total_cost: u64,
+) -> Instruction {
+    buy_ix_with_mint(
+        investor,
+        payer,
+        listing_id,
+        amount,
+        max_total_cost,
+        tgbp_mint(),
+        tgbp_acc(investor),
+        listing_payment_ata(listing_id),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn buy_ix_with_mint(
+    investor: &Pubkey,
+    payer: &Pubkey,
+    listing_id: u64,
+    amount: u32,
+    max_total_cost: u64,
+    payment_mint: Pubkey,
+    investor_payment: Pubkey,
+    listing_payment_account: Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::BuyPropertyShares {
+            listing_id,
+            amount,
+            max_total_cost,
+        }
+        .data(),
+        marketplace::accounts::BuyPropertyShares {
+            investor: *investor,
+            payer: *payer,
+            config: marketplace_config(),
+            investor_role: role_pda(investor, Role::RealEstateInvestor),
+            listing: listing_pda(listing_id),
+            property: property_pda(listing_id),
+            position: position_pda(listing_id, investor),
+            holding: holding_pda(listing_id, investor),
+            payment_mint,
+            investor_payment,
+            listing_vault: listing_vault_pda(listing_id),
+            listing_payment_account,
+            share_mint: share_mint_pda(listing_id),
+            mint_auth: mint_auth_pda(listing_id),
+            property_vault: property_vault_pda(listing_id),
+            vault_share_account: vault_share_account(listing_id),
+            investor_share_account: investor_share_ata(listing_id, investor),
+            payment_token_program: TOKEN_PROGRAM_ID,
+            share_token_program: anchor_spl::token_2022::ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn position_of(
+    svm: &LiteSVM,
+    listing_id: u64,
+    investor: &Pubkey,
+) -> marketplace::state::InvestorPosition {
+    marketplace::state::InvestorPosition::try_deserialize(
+        &mut &svm
+            .get_account(&position_pda(listing_id, investor))
+            .unwrap()
+            .data[..],
+    )
+    .unwrap()
+}
+
+pub fn holding_of(
+    svm: &LiteSVM,
+    asset_id: u64,
+    owner: &Pubkey,
+) -> marketplace::state::ShareHolding {
+    marketplace::state::ShareHolding::try_deserialize(
+        &mut &svm.get_account(&holding_pda(asset_id, owner)).unwrap().data[..],
+    )
+    .unwrap()
+}
+
 pub fn listing_of(svm: &LiteSVM, listing_id: u64) -> marketplace::state::Listing {
     marketplace::state::Listing::try_deserialize(
         &mut &svm.get_account(&listing_pda(listing_id)).unwrap().data[..],
@@ -540,9 +896,17 @@ pub fn property_of(svm: &LiteSVM, asset_id: u64) -> marketplace::state::Property
 }
 
 pub fn register_lawyer_ix(lawyer: &Pubkey, region_id: u16) -> Instruction {
+    register_lawyer_ix_capped(lawyer, region_id, u64::MAX)
+}
+
+pub fn register_lawyer_ix_capped(lawyer: &Pubkey, region_id: u16, max_deposit: u64) -> Instruction {
     Instruction::new_with_bytes(
         mid(),
-        &marketplace::instruction::RegisterLawyer { region_id }.data(),
+        &marketplace::instruction::RegisterLawyer {
+            region_id,
+            max_deposit,
+        }
+        .data(),
         marketplace::accounts::RegisterLawyer {
             lawyer: *lawyer,
             config: marketplace_config(),
@@ -566,12 +930,31 @@ pub fn unregister_lawyer_ix(lawyer: &Pubkey) -> Instruction {
         marketplace::accounts::UnregisterLawyer {
             lawyer: *lawyer,
             config: marketplace_config(),
-            lawyer_role: role_pda(lawyer, Role::Lawyer),
             lawyer_account: lawyer_pda(lawyer),
             xcav_mint: xcav_mint(),
             lawyer_token: token_acc(lawyer),
             vault: vault(),
             token_program: TOKEN_PROGRAM_ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn roles_remove_ix(
+    admin: &Pubkey,
+    user: &Pubkey,
+    role: Role,
+    rent_payer: &Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        roles_id(),
+        &xcavate_whitelist::instruction::RemoveRole { role }.data(),
+        xcavate_whitelist::accounts::RemoveRole {
+            admin_signer: *admin,
+            admin: admin_pda(admin),
+            user: *user,
+            rent_payer: *rent_payer,
+            role_account: role_pda(user, role),
         }
         .to_account_metas(None),
     )
@@ -669,6 +1052,7 @@ pub fn setup() -> (LiteSVM, Keypair, Keypair) {
     set_mint(&mut svm);
 
     let authority = funded(&mut svm);
+    svm.airdrop(&sponsor().pubkey(), 100_000_000_000).unwrap();
     bind_upgrade_authority(&mut svm, &roles_id(), &authority.pubkey());
     bind_upgrade_authority(&mut svm, &mid(), &authority.pubkey());
     ok(

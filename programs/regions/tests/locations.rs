@@ -258,3 +258,137 @@ fn seat_takeover_covers_location_deposits() {
         DEPOSIT + LOCATION_DEPOSIT
     );
 }
+
+#[test]
+fn create_location_rejects_deposit_above_cap() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    fails_with(
+        &mut svm,
+        create_location_ix_capped(&operator.pubkey(), 1, b"SW1A1AA", LOCATION_DEPOSIT - 1),
+        &operator,
+        &[&operator],
+        "DepositTooHigh",
+    );
+}
+
+// A lame-duck operator must not reprice the seat during the takeover window.
+#[test]
+fn create_location_blocked_when_seat_open() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    ok(
+        &mut svm,
+        resign_ix(&operator.pubkey(), 1),
+        &operator,
+        &[&operator],
+    );
+    warp(&mut svm, 6_000);
+    fails_with(
+        &mut svm,
+        create_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+        "SeatOpen",
+    );
+}
+
+#[test]
+fn remove_location_returns_recorded_deposit() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    ok(
+        &mut svm,
+        create_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+    );
+
+    // The configured deposit doubles after the operator already paid theirs;
+    // removal still refunds what was actually locked.
+    let mut params = default_params();
+    params.location_deposit = 2 * LOCATION_DEPOSIT;
+    ok(
+        &mut svm,
+        update_config_ix(&authority.pubkey(), params),
+        &authority,
+        &[&authority],
+    );
+
+    let before = xcav_balance(&svm, &operator.pubkey());
+    ok(
+        &mut svm,
+        remove_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+    );
+    assert_eq!(
+        xcav_balance(&svm, &operator.pubkey()) - before,
+        LOCATION_DEPOSIT
+    );
+    let region = region_of(&svm, 1);
+    assert_eq!(region.collateral, DEPOSIT);
+    assert_eq!(region.location_count, 0);
+    assert!(svm
+        .get_account(&location_pda(1, b"SW1A1AA"))
+        .is_none_or(|a| a.data.is_empty()));
+
+    // The postcode can be registered again, now at the new rate.
+    ok(
+        &mut svm,
+        create_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+    );
+    assert_eq!(
+        region_of(&svm, 1).collateral,
+        DEPOSIT + 2 * LOCATION_DEPOSIT
+    );
+}
+
+#[test]
+fn remove_location_requires_owner() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    ok(
+        &mut svm,
+        create_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+    );
+
+    let other = new_operator(&mut svm, &authority);
+    fails_with(
+        &mut svm,
+        remove_location_ix(&other.pubkey(), 1, b"SW1A1AA"),
+        &other,
+        &[&other],
+        "NotRegionOwner",
+    );
+}
+
+#[test]
+fn remove_location_blocked_when_seat_open() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    ok(
+        &mut svm,
+        create_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+    );
+    ok(
+        &mut svm,
+        resign_ix(&operator.pubkey(), 1),
+        &operator,
+        &[&operator],
+    );
+    warp(&mut svm, 6_000);
+    fails_with(
+        &mut svm,
+        remove_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+        "SeatOpen",
+    );
+}

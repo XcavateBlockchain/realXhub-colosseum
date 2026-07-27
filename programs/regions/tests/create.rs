@@ -80,9 +80,15 @@ fn create_region_rechecks_operator_role() {
         &authority,
         &[&authority],
     );
+    let payer = role_rent_payer(&svm, &operator.pubkey(), Role::RegionalOperator);
     ok(
         &mut svm,
-        roles_remove_ix(&admin.pubkey(), &operator.pubkey(), Role::RegionalOperator),
+        roles_remove_ix(
+            &admin.pubkey(),
+            &operator.pubkey(),
+            Role::RegionalOperator,
+            &payer,
+        ),
         &admin,
         &[&admin],
     );
@@ -93,6 +99,51 @@ fn create_region_rechecks_operator_role() {
         &[&operator],
         "AccountNotInitialized",
     );
+}
+
+// Resignation is an exit path, so it works even after the operator's role is
+// revoked; their collateral countdown must never depend on an admin's mercy.
+#[test]
+fn resignation_works_without_role() {
+    let (mut svm, operator, authority) = setup();
+    reach_created(&mut svm, &operator, &authority);
+
+    let admin = funded(&mut svm);
+    ok(
+        &mut svm,
+        roles_add_admin_ix(&authority.pubkey(), &admin.pubkey()),
+        &authority,
+        &[&authority],
+    );
+    let payer = role_rent_payer(&svm, &operator.pubkey(), Role::RegionalOperator);
+    ok(
+        &mut svm,
+        roles_remove_ix(
+            &admin.pubkey(),
+            &operator.pubkey(),
+            Role::RegionalOperator,
+            &payer,
+        ),
+        &admin,
+        &[&admin],
+    );
+
+    ok(
+        &mut svm,
+        resign_ix(&operator.pubkey(), 1),
+        &operator,
+        &[&operator],
+    );
+    warp(&mut svm, 6_000);
+    // Another operator can then claim the seat, refunding the collateral.
+    let newop = new_operator(&mut svm, &authority);
+    ok(
+        &mut svm,
+        claim_open_region_ix(&newop.pubkey(), 1, &operator.pubkey()),
+        &newop,
+        &[&newop],
+    );
+    assert_eq!(xcav_balance(&svm, &operator.pubkey()), FUND_XCAV);
 }
 
 // ============================ claim an open seat ============================
@@ -271,12 +322,11 @@ fn stale_passed_region_clears_and_refunds_bond() {
         .is_none_or(|a| a.data.is_empty()));
 }
 
-// A takeover prices location deposits at the current config rate, while the
-// outgoing operator is refunded exactly the collateral they actually locked.
-// A deposit raise between lock and turnover therefore charges the newcomer
-// more but can never over-draw the vault on the refund side.
+// A takeover charges the deposits the locations actually locked, not the
+// current config rate, so a config change between lock and turnover never
+// drifts the standing bond or the vault.
 #[test]
-fn takeover_reprices_locations_but_refunds_actual_collateral() {
+fn takeover_charges_recorded_location_deposits() {
     let (mut svm, operator, authority) = setup();
     reach_created(&mut svm, &operator, &authority);
     ok(
@@ -287,6 +337,7 @@ fn takeover_reprices_locations_but_refunds_actual_collateral() {
     );
     let locked = DEPOSIT + LOCATION_DEPOSIT;
     assert_eq!(region_of(&svm, 1).collateral, locked);
+    assert_eq!(region_of(&svm, 1).location_collateral, LOCATION_DEPOSIT);
 
     // The location deposit doubles after the operator already paid theirs.
     let mut params = default_params();
@@ -317,11 +368,83 @@ fn takeover_reprices_locations_but_refunds_actual_collateral() {
         &[&newop],
     );
 
-    // The newcomer bonds at the new rate; the outgoing operator gets back what
-    // they locked, not what the formula says today.
-    let repriced = DEPOSIT + 2 * LOCATION_DEPOSIT;
-    assert_eq!(region_of(&svm, 1).collateral, repriced);
-    assert_eq!(new_before - xcav_balance(&svm, &newop.pubkey()), repriced);
+    // The newcomer assumes exactly what the locations locked; the outgoing
+    // operator gets exactly that back; the vault doesn't move.
+    assert_eq!(region_of(&svm, 1).collateral, locked);
+    assert_eq!(new_before - xcav_balance(&svm, &newop.pubkey()), locked);
     assert_eq!(xcav_balance(&svm, &operator.pubkey()) - old_before, locked);
-    assert_eq!(vault_balance(&svm), vault_before + repriced - locked);
+    assert_eq!(vault_balance(&svm), vault_before);
+}
+
+// The bond invariant survives a deposit change, a takeover, and a removal in
+// sequence: removing the last location leaves the new operator holding
+// exactly the operator bond, never less.
+#[test]
+fn takeover_then_remove_location_keeps_bond_intact() {
+    let (mut svm, operator, authority) = setup();
+    reach_created(&mut svm, &operator, &authority);
+    ok(
+        &mut svm,
+        create_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+    );
+
+    // The configured deposit collapses to a hundredth after the lock.
+    let mut params = default_params();
+    params.location_deposit = LOCATION_DEPOSIT / 100;
+    ok(
+        &mut svm,
+        update_config_ix(&authority.pubkey(), params),
+        &authority,
+        &[&authority],
+    );
+    ok(
+        &mut svm,
+        resign_ix(&operator.pubkey(), 1),
+        &operator,
+        &[&operator],
+    );
+    warp(&mut svm, 6_000);
+    let newop = new_operator(&mut svm, &authority);
+    ok(
+        &mut svm,
+        claim_open_region_ix(&newop.pubkey(), 1, &operator.pubkey()),
+        &newop,
+        &[&newop],
+    );
+
+    let before = xcav_balance(&svm, &newop.pubkey());
+    ok(
+        &mut svm,
+        remove_location_ix(&newop.pubkey(), 1, b"SW1A1AA"),
+        &newop,
+        &[&newop],
+    );
+
+    // The recorded deposit comes back and the seat still carries the full
+    // operator bond.
+    assert_eq!(
+        xcav_balance(&svm, &newop.pubkey()) - before,
+        LOCATION_DEPOSIT
+    );
+    let region = region_of(&svm, 1);
+    assert_eq!(region.collateral, DEPOSIT);
+    assert_eq!(region.location_collateral, 0);
+    assert_eq!(region.location_count, 0);
+}
+
+#[test]
+fn claim_open_region_rejects_deposit_above_cap() {
+    let (mut svm, operator, authority) = setup();
+    reach_seat_open(&mut svm, &operator, &authority);
+
+    let newop = new_operator(&mut svm, &authority);
+    fails_with(
+        &mut svm,
+        claim_open_region_ix_capped(&newop.pubkey(), 1, &operator.pubkey(), DEPOSIT - 1),
+        &newop,
+        &[&newop],
+        "DepositTooHigh",
+    );
 }

@@ -709,20 +709,24 @@ fn finalize_pass_without_proposer_token_works() {
     );
     warp_past_voting(&mut svm);
 
-    // A pass keeps the bond as collateral (no XCAV moves to the proposer), so the
-    // crank settles even with no proposer token account at all.
+    // A pass keeps the bond as collateral (no XCAV moves to the proposer), so
+    // the crank settles even after the proposer closed their token account.
+    svm.set_account(token_acc(&operator.pubkey()), Account::default())
+        .unwrap();
     let cranker = funded(&mut svm);
     ok(
         &mut svm,
-        finalize_no_token_ix(&cranker.pubkey(), 1, id, &operator.pubkey()),
+        finalize_ix(&cranker.pubkey(), 1, id, &operator.pubkey()),
         &cranker,
         &[&cranker],
     );
     assert_eq!(region_state_of(&svm, 1).status, RegionStatus::Passed);
 }
 
+// A proposer closing their token account must not wedge the reject path: the
+// crank recreates the associated account and the refund lands there.
 #[test]
-fn finalize_reject_requires_proposer_token() {
+fn finalize_reject_survives_closed_proposer_token() {
     let (mut svm, operator, _authority) = setup();
     let id = next_proposal_id(&svm);
     ok(
@@ -733,15 +737,17 @@ fn finalize_reject_requires_proposer_token() {
     );
     warp_past_voting(&mut svm);
 
-    // A rejection refunds the bond to the proposer, so the account is mandatory.
+    svm.set_account(token_acc(&operator.pubkey()), Account::default())
+        .unwrap();
     let cranker = funded(&mut svm);
-    fails_with(
+    ok(
         &mut svm,
-        finalize_no_token_ix(&cranker.pubkey(), 1, id, &operator.pubkey()),
+        finalize_ix(&cranker.pubkey(), 1, id, &operator.pubkey()),
         &cranker,
         &[&cranker],
-        "MissingRecipientToken",
     );
+    assert_eq!(region_state_of(&svm, 1).status, RegionStatus::Rejected);
+    assert_eq!(xcav_balance(&svm, &operator.pubkey()), DEPOSIT);
 }
 
 // A passing proposal keeps the bond locked as the region's collateral; the
@@ -778,4 +784,89 @@ fn finalize_pass_keeps_bond_locked() {
     assert_eq!(region_state_of(&svm, 1).status, RegionStatus::Passed);
     assert_eq!(xcav_balance(&svm, &operator.pubkey()), op_before);
     assert_eq!(vault_balance(&svm), DEPOSIT + 200_000_000);
+}
+
+// Power can't be rented for one slot: a vote landing inside the min-hold
+// window (100s before expiry) is rejected, so every lock lasts at least that
+// long past the tally.
+#[test]
+fn vote_inside_hold_window_fails() {
+    let (mut svm, operator, _authority) = setup();
+    let id = next_proposal_id(&svm);
+    ok(
+        &mut svm,
+        propose_ix(&operator.pubkey(), 1, id),
+        &operator,
+        &[&operator],
+    );
+
+    // 150s of the 1_000s window left: still fine.
+    warp(&mut svm, 850);
+    let early = actor(&mut svm);
+    ok(
+        &mut svm,
+        vote_ix(&early.pubkey(), 1, id, Vote::Yes, 200_000_000),
+        &early,
+        &[&early],
+    );
+
+    // 50s left: inside the hold window.
+    warp(&mut svm, 100);
+    let late = actor(&mut svm);
+    fails_with(
+        &mut svm,
+        vote_ix(&late.pubkey(), 1, id, Vote::Yes, 200_000_000),
+        &late,
+        &[&late],
+        "VoteTooLate",
+    );
+}
+
+#[test]
+fn propose_rejects_deposit_above_cap() {
+    let (mut svm, operator, _authority) = setup();
+    let id = next_proposal_id(&svm);
+    fails_with(
+        &mut svm,
+        propose_ix_capped(&operator.pubkey(), 1, id, DEPOSIT - 1),
+        &operator,
+        &[&operator],
+        "DepositTooHigh",
+    );
+}
+
+// The vote cutoff is snapshotted when the proposal opens; a later config
+// change can't shrink (or silence) an in-flight proposal's window.
+#[test]
+fn vote_cutoff_is_snapshotted_at_propose() {
+    let (mut svm, operator, authority) = setup();
+    let id = next_proposal_id(&svm);
+    ok(
+        &mut svm,
+        propose_ix(&operator.pubkey(), 1, id),
+        &operator,
+        &[&operator],
+    );
+
+    // The authority stretches both the window and the hold so that, read
+    // live, the whole remaining window would be inside the hold.
+    let mut params = default_params();
+    params.voting_period = 10_000;
+    params.min_vote_hold = 9_999;
+    ok(
+        &mut svm,
+        update_config_ix(&authority.pubkey(), params),
+        &authority,
+        &[&authority],
+    );
+
+    // 150s before the original expiry: still outside the original 100s hold.
+    warp(&mut svm, 850);
+    let voter = actor(&mut svm);
+    ok(
+        &mut svm,
+        vote_ix(&voter.pubkey(), 1, id, Vote::Yes, 200_000_000),
+        &voter,
+        &[&voter],
+    );
 }

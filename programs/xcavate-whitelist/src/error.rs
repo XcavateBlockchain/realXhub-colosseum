@@ -17,4 +17,7 @@ pub enum WhitelistError {
     /// The signer is not the proposed pending authority.
     #[msg("Signer is not the pending authority")]
     NotPendingAuthority,
+    /// The rent destination is not the account's recorded rent payer.
+    #[msg("Wrong rent payer")]
+    WrongRentPayer,
 }

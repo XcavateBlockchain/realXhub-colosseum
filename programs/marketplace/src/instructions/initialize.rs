@@ -3,7 +3,9 @@ use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
 use crate::constants::{CONFIG_SEED, VAULT_SEED};
 use crate::error::MarketplaceError;
-use crate::state::{Config, MAX_PAYMENT_MINTS, MAX_SHARE_SUPPLY};
+use crate::state::{
+    Config, MAX_PAYMENT_DECIMALS, MAX_PAYMENT_MINTS, MAX_SHARE_SUPPLY, MIN_PAYMENT_DECIMALS,
+};
 
 /// Protocol parameters for the marketplace program.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -91,6 +93,24 @@ impl ConfigParams {
     }
 }
 
+/// Each accepted payment mint must be passed as a remaining account, proving
+/// it is a real mint the vault accounting supports; a typo'd or fee-bearing
+/// entry would otherwise only surface once a buyer's funds hit it. Decimals
+/// are bounded so price rescaling can neither floor a minimum-priced share to
+/// zero nor overflow.
+fn validate_payment_mints(mints: &[Pubkey], infos: &[AccountInfo]) -> Result<()> {
+    require!(infos.len() == mints.len(), MarketplaceError::InvalidConfig);
+    for (expected, info) in mints.iter().zip(infos) {
+        require!(info.key == expected, MarketplaceError::InvalidConfig);
+        let decimals = crate::mint_guard::require_supported_mint(info)?;
+        require!(
+            (MIN_PAYMENT_DECIMALS..=MAX_PAYMENT_DECIMALS).contains(&decimals),
+            MarketplaceError::InvalidConfig
+        );
+    }
+    Ok(())
+}
+
 /// Creates the singleton config and sets the authority to the signer. Only
 /// the program's upgrade authority can call this, so the config can't be
 /// claimed by a front-runner between deploy and initialization.
@@ -119,7 +139,7 @@ pub struct InitializeConfig<'info> {
     /// The XCAV mint deposits are paid in.
     pub xcav_mint: Box<InterfaceAccount<'info, Mint>>,
 
-    /// The protocol's XCAV escrow vault, owned by the config PDA. Holds
+    /// The protocol's XCAV vault, owned by the config PDA. Holds
     /// listing and lawyer deposits.
     #[account(
         init,
@@ -138,6 +158,7 @@ pub struct InitializeConfig<'info> {
 pub fn handler(ctx: Context<InitializeConfig>, params: ConfigParams) -> Result<()> {
     params.validate()?;
     crate::mint_guard::require_supported_mint(&ctx.accounts.xcav_mint.to_account_info())?;
+    validate_payment_mints(&params.accepted_payment_mints, ctx.remaining_accounts)?;
 
     let config = &mut ctx.accounts.config;
     config.authority = ctx.accounts.authority.key();
@@ -172,6 +193,7 @@ pub struct UpdateConfig<'info> {
 
 pub fn update_config_handler(ctx: Context<UpdateConfig>, params: ConfigParams) -> Result<()> {
     params.validate()?;
+    validate_payment_mints(&params.accepted_payment_mints, ctx.remaining_accounts)?;
     let config = &mut ctx.accounts.config;
     params.apply(config);
 

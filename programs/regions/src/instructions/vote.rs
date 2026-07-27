@@ -30,7 +30,7 @@ pub struct VoteOnRegionProposal<'info> {
     )]
     pub voter_token: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// The protocol's XCAV escrow vault.
+    /// The protocol's XCAV vault.
     #[account(
         mut,
         seeds = [VAULT_SEED],
@@ -84,6 +84,14 @@ pub fn vote_on_region_proposal_handler(
     require!(
         now < ctx.accounts.proposal.expiry,
         RegionsError::ProposalExpired
+    );
+    // Every vote's lock must survive at least the minimum hold, so power can't
+    // be borrowed for one slot to flip the tally and unlock right after. The
+    // cutoff was snapshotted at propose time, so a config change can't shrink
+    // an open proposal's window.
+    require!(
+        now < ctx.accounts.proposal.vote_cutoff,
+        RegionsError::VoteTooLate
     );
 
     let decimals = ctx.accounts.xcav_mint.decimals;

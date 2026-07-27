@@ -27,7 +27,10 @@ pub struct Config {
     /// The sponsor wallet that fronts account rent for investors. Every
     /// position close sends its lamports here, not to the investor.
     pub rent_collector: Pubkey,
-    /// Mints a property can be priced and paid in.
+    /// Mints a property can be priced and paid in. Every entry must be a
+    /// same-value GBP stablecoin: prices convert between them by decimal
+    /// count alone, so adding a mint of different value would misprice every
+    /// open listing.
     #[max_len(MAX_PAYMENT_MINTS)]
     pub accepted_payment_mints: Vec<Pubkey>,
     /// XCAV a developer locks to list a property.
@@ -120,11 +123,66 @@ pub struct Listing {
     pub tax_paid_by_developer: bool,
     /// The region's sale tax at listing time, in basis points.
     pub tax_bps: u16,
+    /// Protocol fee at listing time, in basis points.
+    pub marketplace_fee_bps: u16,
+    /// Investor fee at listing time, in basis points.
+    pub investor_fee_bps: u16,
+    /// Ownership cap at listing time, in basis points.
+    pub max_ownership_bps: u16,
     pub listing_expiry: i64,
     /// The XCAV locked by the developer at listing, held in the vault.
     /// Returned at teardown.
     pub deposit: u64,
     pub status: ListingStatus,
+    pub bump: u8,
+}
+
+/// Prices are quoted at this scale (tGBP's 9 decimals); transfers rescale to
+/// each payment mint's own decimals, flooring in the investor's favour. The
+/// rescale is by decimal count alone, which is only sound because every
+/// accepted payment mint must be a same-value GBP stablecoin.
+pub const PRICE_DECIMALS: u8 = 9;
+
+/// Accepted payment mints must sit in this decimals range: the lower bound
+/// keeps a minimum-priced share from flooring to zero, the upper bound keeps
+/// the rescale arithmetic comfortably inside u128.
+pub const MIN_PAYMENT_DECIMALS: u8 = 6;
+pub const MAX_PAYMENT_DECIMALS: u8 = 12;
+
+/// The canonical share ledger for one holder of one property. The Token-2022
+/// accounts mirror this; they never lead it.
+#[account]
+#[derive(InitSpace)]
+pub struct ShareHolding {
+    pub asset_id: u64,
+    pub owner: Pubkey,
+    pub amount: u32,
+    /// Shares locked by votes; blocked from transfer until unlocked.
+    pub locked_amount: u32,
+    pub bump: u8,
+}
+
+/// One investor's stake in a primary listing: what they paid, per component,
+/// so refunds and settlement can be exact. The shares themselves are already
+/// delivered; this is the accounting.
+#[account]
+#[derive(InitSpace)]
+pub struct InvestorPosition {
+    pub listing_id: u64,
+    pub investor: Pubkey,
+    /// The mint the investor paid in. One mint per position: later buys must
+    /// use the same one, so every refund is a single transfer.
+    pub payment_mint: Pubkey,
+    pub share_amount: u32,
+    /// Paid toward the property price, in payment-mint base units.
+    pub paid_funds: u64,
+    /// Paid as sale tax on top, in payment-mint base units.
+    pub paid_tax: u64,
+    /// Paid as the investor fee on top, in payment-mint base units.
+    pub paid_fee: u64,
+    /// Set when the investor unreserved. The position stays open as the
+    /// one-way re-buy bar: `buy` rejects a cancelled position forever.
+    pub cancelled: bool,
     pub bump: u8,
 }
 

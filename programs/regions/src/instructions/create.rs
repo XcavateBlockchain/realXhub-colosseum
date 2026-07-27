@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_spl::associated_token::{create_idempotent, AssociatedToken, Create as CreateAta};
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
 use crate::constants::{CONFIG_SEED, REGION_SEED, REGION_STATE_SEED, VAULT_SEED};
@@ -95,6 +96,7 @@ pub fn create_region_handler(
     region.region_id = region_id;
     region.owner = ctx.accounts.creator.key();
     region.collateral = collateral;
+    region.location_collateral = 0;
     region.next_owner_change = next_owner_change;
     region.listing_duration = listing_duration;
     region.tax_bps = tax_bps;
@@ -114,8 +116,8 @@ pub fn create_region_handler(
 /// Claim a region whose operator seat is open: the term has elapsed, whether it
 /// ran its course or was brought forward by a resignation notice. First-come:
 /// RegionalOperator-only, no vote. The caller bonds 0.1% of the XCAV supply
-/// plus one location deposit per registered location (they take over the
-/// locations too), which becomes the new collateral, and the outgoing
+/// plus the recorded deposits backing the registered locations (they take the
+/// locations over), which becomes the new collateral, and the outgoing
 /// operator's remaining collateral is returned.
 /// The incumbent may claim their own seat to renew it, in which case
 /// `old_owner_token` is omitted and only the difference between their existing
@@ -152,7 +154,7 @@ pub struct ClaimOpenRegion<'info> {
     )]
     pub new_operator_token: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// The protocol's XCAV escrow vault.
+    /// The protocol's XCAV vault.
     #[account(
         mut,
         seeds = [VAULT_SEED],
@@ -169,20 +171,28 @@ pub struct ClaimOpenRegion<'info> {
     )]
     pub region: Box<Account<'info, Region>>,
 
-    /// The outgoing operator's XCAV account; receives their returned collateral.
-    /// Omitted when the incumbent renews their own seat (they are refunded
-    /// through `new_operator_token` instead).
-    #[account(
-        mut,
-        token::mint = config.xcav_mint,
-        token::authority = region.owner,
-    )]
-    pub old_owner_token: Option<Box<InterfaceAccount<'info, TokenAccount>>>,
+    /// CHECK: the outgoing operator; owner of the collateral refund.
+    #[account(address = region.owner @ RegionsError::NotRegionOwner)]
+    pub old_owner: UncheckedAccount<'info>,
+
+    /// CHECK: the outgoing operator's associated XCAV account; receives their
+    /// returned collateral on a takeover. Created idempotently (the ATA
+    /// program verifies the derivation), so an outgoing operator closing their
+    /// account can't make the seat uncontestable. Unused when the incumbent
+    /// renews (they are refunded through `new_operator_token` instead).
+    #[account(mut)]
+    pub old_owner_token: UncheckedAccount<'info>,
 
     pub token_program: Interface<'info, TokenInterface>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
 }
 
-pub fn claim_open_region_handler(ctx: Context<ClaimOpenRegion>, _region_id: u16) -> Result<()> {
+pub fn claim_open_region_handler(
+    ctx: Context<ClaimOpenRegion>,
+    _region_id: u16,
+    max_deposit: u64,
+) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     // The seat must be open: the operator's term has elapsed.
     require!(
@@ -190,18 +200,16 @@ pub fn claim_open_region_handler(ctx: Context<ClaimOpenRegion>, _region_id: u16)
         RegionsError::RegionOwnerCantBeChanged
     );
 
-    // The seat's collateral covers the operator bond plus the deposits backing
-    // the region's registered locations, which transfer to the new operator.
-    let location_deposits = ctx
-        .accounts
-        .config
-        .location_deposit
-        .checked_mul(ctx.accounts.region.location_count as u64)
-        .ok_or(RegionsError::Overflow)?;
+    // The bond covers the operator's stake plus the recorded deposits behind
+    // the locations, which transfer to the new operator (see
+    // `Region::location_collateral` for why it's never recomputed from config).
     let bond = operator_bond(ctx.accounts.xcav_mint.supply)
         .ok_or(RegionsError::BondTooSmall)?
-        .checked_add(location_deposits)
+        .checked_add(ctx.accounts.region.location_collateral)
         .ok_or(RegionsError::Overflow)?;
+    // Supply and config move between signing and landing; the caller caps what
+    // they are willing to bond.
+    require!(bond <= max_deposit, RegionsError::DepositTooHigh);
     let decimals = ctx.accounts.xcav_mint.decimals;
     let config_bump = ctx.accounts.config.bump;
     let existing_collateral = ctx.accounts.region.collateral;
@@ -235,12 +243,8 @@ pub fn claim_open_region_handler(ctx: Context<ClaimOpenRegion>, _region_id: u16)
         }
     } else {
         // A different operator takes over: lock their full bond, then return the
-        // outgoing operator's collateral to their account.
-        let old_owner_token = ctx
-            .accounts
-            .old_owner_token
-            .as_ref()
-            .ok_or(RegionsError::MissingRecipientToken)?;
+        // outgoing operator's collateral. The claimant fronts the token-account
+        // rent if the outgoing operator closed theirs.
         lock_to_vault(
             &ctx.accounts.token_program.to_account_info(),
             &ctx.accounts.new_operator_token.to_account_info(),
@@ -250,11 +254,22 @@ pub fn claim_open_region_handler(ctx: Context<ClaimOpenRegion>, _region_id: u16)
             bond,
             decimals,
         )?;
+        create_idempotent(CpiContext::new(
+            ctx.accounts.associated_token_program.key(),
+            CreateAta {
+                payer: ctx.accounts.new_operator.to_account_info(),
+                associated_token: ctx.accounts.old_owner_token.to_account_info(),
+                authority: ctx.accounts.old_owner.to_account_info(),
+                mint: ctx.accounts.xcav_mint.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
+            },
+        ))?;
         release_from_vault(
             &ctx.accounts.token_program.to_account_info(),
             &ctx.accounts.vault.to_account_info(),
             &ctx.accounts.xcav_mint.to_account_info(),
-            &old_owner_token.to_account_info(),
+            &ctx.accounts.old_owner_token.to_account_info(),
             &ctx.accounts.config.to_account_info(),
             config_bump,
             existing_collateral,
@@ -280,9 +295,11 @@ pub fn claim_open_region_handler(ctx: Context<ClaimOpenRegion>, _region_id: u16)
     Ok(())
 }
 
-/// Schedule the caller's own departure as a region's operator. RegionalOperator
-/// and current owner only. Brings the seat open after the configured notice
-/// period, allowing another operator to claim it.
+/// Schedule the caller's own departure as a region's operator. Current owner
+/// only. Brings the seat open after the configured notice period, allowing
+/// another operator to claim it. Deliberately not role-gated: resigning is a
+/// pure exit, and an operator whose role was revoked must still be able to
+/// start the countdown that frees their collateral.
 #[derive(Accounts)]
 #[instruction(region_id: u16)]
 pub struct InitiateResignation<'info> {
@@ -290,17 +307,6 @@ pub struct InitiateResignation<'info> {
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Box<Account<'info, Config>>,
-
-    #[account(
-        seeds = [
-            xcavate_whitelist::ROLE_SEED,
-            operator.key().as_ref(),
-            &[Role::RegionalOperator.seed_byte()],
-        ],
-        bump = operator_role.bump,
-        seeds::program = xcavate_whitelist::ID,
-    )]
-    pub operator_role: Box<Account<'info, RoleAccount>>,
 
     #[account(
         mut,

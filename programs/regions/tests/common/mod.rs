@@ -31,7 +31,7 @@ use anchor_lang::{InstructionData, ToAccountMetas};
 use anchor_spl::token::spl_token::state::{Account as SplAccount, AccountState, Mint as SplMint};
 use anchor_spl::token::ID as TOKEN_PROGRAM_ID;
 use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};
-use solana_account::Account;
+pub use solana_account::Account;
 use solana_message::{Message, VersionedMessage};
 use solana_transaction::versioned::VersionedTransaction;
 
@@ -110,11 +110,13 @@ pub fn xcav_mint() -> Pubkey {
     Pubkey::new_from_array([7u8; 32])
 }
 
-/// Deterministic XCAV token account for an owner. Not a real ATA; the program
-/// only checks the mint and authority, so any token account works.
+/// The owner's associated XCAV token account. A real ATA, since the refund
+/// paths recreate recipients' accounts idempotently at the canonical address.
 pub fn token_acc(owner: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"xcav_token", owner.as_ref()], &rid()).0
+    anchor_spl::associated_token::get_associated_token_address(owner, &xcav_mint())
 }
+
+pub const ATA_PROGRAM_ID: Pubkey = anchor_spl::associated_token::ID;
 
 pub fn set_mint(svm: &mut LiteSVM) {
     // Chosen so the 0.1% operator bond (supply / 1000) equals DEPOSIT.
@@ -292,7 +294,12 @@ pub fn roles_add_admin_ix(authority: &Pubkey, new_admin: &Pubkey) -> Instruction
     )
 }
 
-pub fn roles_remove_ix(admin: &Pubkey, user: &Pubkey, role: Role) -> Instruction {
+pub fn roles_remove_ix(
+    admin: &Pubkey,
+    user: &Pubkey,
+    role: Role,
+    rent_payer: &Pubkey,
+) -> Instruction {
     Instruction::new_with_bytes(
         roles_id(),
         &xcavate_whitelist::instruction::RemoveRole { role }.data(),
@@ -300,6 +307,7 @@ pub fn roles_remove_ix(admin: &Pubkey, user: &Pubkey, role: Role) -> Instruction
             admin_signer: *admin,
             admin: admin_pda(admin),
             user: *user,
+            rent_payer: *rent_payer,
             role_account: role_pda(user, role),
         }
         .to_account_metas(None),
@@ -331,6 +339,7 @@ pub fn default_params() -> ConfigParams {
         threshold_bps: 5_000,
         quorum: 100_000_000,
         notice_period: 5_000,
+        min_vote_hold: 100,
         max_listing_duration: 1_000_000,
         max_tax_bps: 1_000,
         location_deposit: LOCATION_DEPOSIT,
@@ -387,9 +396,22 @@ pub fn update_authority_ix(authority: &Pubkey, new_authority: &Pubkey) -> Instru
 }
 
 pub fn propose_ix(proposer: &Pubkey, region_id: u16, proposal_id: u64) -> Instruction {
+    propose_ix_capped(proposer, region_id, proposal_id, u64::MAX)
+}
+
+pub fn propose_ix_capped(
+    proposer: &Pubkey,
+    region_id: u16,
+    proposal_id: u64,
+    max_deposit: u64,
+) -> Instruction {
     Instruction::new_with_bytes(
         rid(),
-        &regions::instruction::ProposeNewRegion { region_id }.data(),
+        &regions::instruction::ProposeNewRegion {
+            region_id,
+            max_deposit,
+        }
+        .data(),
         regions::accounts::ProposeNewRegion {
             proposer: *proposer,
             config: regions_config(),
@@ -455,34 +477,10 @@ pub fn finalize_ix(
             region_state: region_state(region_id),
             proposal: proposal_pda(proposal_id),
             proposer: *proposer,
-            proposer_token: Some(token_acc(proposer)),
+            proposer_token: token_acc(proposer),
             token_program: TOKEN_PROGRAM_ID,
-        }
-        .to_account_metas(None),
-    )
-}
-
-// Finalize without any proposer token account, as a cranker would when the
-// proposer has closed theirs. Only the reject path can settle this way.
-pub fn finalize_no_token_ix(
-    cranker: &Pubkey,
-    region_id: u16,
-    proposal_id: u64,
-    proposer: &Pubkey,
-) -> Instruction {
-    Instruction::new_with_bytes(
-        rid(),
-        &regions::instruction::FinalizeRegionProposal { region_id }.data(),
-        regions::accounts::FinalizeRegionProposal {
-            cranker: *cranker,
-            config: regions_config(),
-            xcav_mint: xcav_mint(),
-            vault: vault(),
-            region_state: region_state(region_id),
-            proposal: proposal_pda(proposal_id),
-            proposer: *proposer,
-            proposer_token: None,
-            token_program: TOKEN_PROGRAM_ID,
+            associated_token_program: ATA_PROGRAM_ID,
+            system_program: SYS,
         }
         .to_account_metas(None),
     )
@@ -527,9 +525,22 @@ pub fn claim_open_region_ix(
     region_id: u16,
     old_owner: &Pubkey,
 ) -> Instruction {
+    claim_open_region_ix_capped(new_operator, region_id, old_owner, u64::MAX)
+}
+
+pub fn claim_open_region_ix_capped(
+    new_operator: &Pubkey,
+    region_id: u16,
+    old_owner: &Pubkey,
+    max_deposit: u64,
+) -> Instruction {
     Instruction::new_with_bytes(
         rid(),
-        &regions::instruction::ClaimOpenRegion { region_id }.data(),
+        &regions::instruction::ClaimOpenRegion {
+            region_id,
+            max_deposit,
+        }
+        .data(),
         regions::accounts::ClaimOpenRegion {
             new_operator: *new_operator,
             config: regions_config(),
@@ -538,32 +549,19 @@ pub fn claim_open_region_ix(
             new_operator_token: token_acc(new_operator),
             vault: vault(),
             region: region_pda(region_id),
-            old_owner_token: Some(token_acc(old_owner)),
+            old_owner: *old_owner,
+            old_owner_token: token_acc(old_owner),
             token_program: TOKEN_PROGRAM_ID,
+            associated_token_program: ATA_PROGRAM_ID,
+            system_program: SYS,
         }
         .to_account_metas(None),
     )
 }
 
-/// Renew the incumbent's own open seat (no outgoing account; only the bond
-/// difference moves).
+/// Renew the incumbent's own open seat (only the bond difference moves).
 pub fn renew_region_ix(operator: &Pubkey, region_id: u16) -> Instruction {
-    Instruction::new_with_bytes(
-        rid(),
-        &regions::instruction::ClaimOpenRegion { region_id }.data(),
-        regions::accounts::ClaimOpenRegion {
-            new_operator: *operator,
-            config: regions_config(),
-            operator_role: role_pda(operator, Role::RegionalOperator),
-            xcav_mint: xcav_mint(),
-            new_operator_token: token_acc(operator),
-            vault: vault(),
-            region: region_pda(region_id),
-            old_owner_token: None,
-            token_program: TOKEN_PROGRAM_ID,
-        }
-        .to_account_metas(None),
-    )
+    claim_open_region_ix(operator, region_id, operator)
 }
 
 pub fn unlock_ix(voter: &Pubkey, proposal_id: u64) -> Instruction {
@@ -593,8 +591,11 @@ pub fn clear_ix(cranker: &Pubkey, region_id: u16, proposer: &Pubkey) -> Instruct
             xcav_mint: xcav_mint(),
             vault: vault(),
             region_state: region_state(region_id),
-            proposer_token: Some(token_acc(proposer)),
+            proposer: *proposer,
+            proposer_token: token_acc(proposer),
             token_program: TOKEN_PROGRAM_ID,
+            associated_token_program: ATA_PROGRAM_ID,
+            system_program: SYS,
         }
         .to_account_metas(None),
     )
@@ -664,6 +665,16 @@ pub fn next_proposal_id(svm: &LiteSVM) -> u64 {
     RegionsConfig::try_deserialize(&mut &acc.data[..])
         .unwrap()
         .proposal_counter
+}
+
+/// Reads who paid a role account's rent (the assigning admin), which any
+/// teardown must name as the refund destination.
+pub fn role_rent_payer(svm: &LiteSVM, user: &Pubkey, role: Role) -> Pubkey {
+    xcavate_whitelist::state::RoleAccount::try_deserialize(
+        &mut &svm.get_account(&role_pda(user, role)).unwrap().data[..],
+    )
+    .unwrap()
+    .rent_payer
 }
 
 // Adds a second compliant RegionalOperator (with XCAV).
@@ -762,7 +773,6 @@ pub fn resign_ix(operator: &Pubkey, region_id: u16) -> Instruction {
         regions::accounts::InitiateResignation {
             operator: *operator,
             config: regions_config(),
-            operator_role: role_pda(operator, Role::RegionalOperator),
             region: region_pda(region_id),
         }
         .to_account_metas(None),
@@ -784,11 +794,21 @@ pub fn accept_authority_ix(new_authority: &Pubkey) -> Instruction {
 }
 
 pub fn create_location_ix(operator: &Pubkey, region_id: u16, postcode: &[u8]) -> Instruction {
+    create_location_ix_capped(operator, region_id, postcode, u64::MAX)
+}
+
+pub fn create_location_ix_capped(
+    operator: &Pubkey,
+    region_id: u16,
+    postcode: &[u8],
+    max_deposit: u64,
+) -> Instruction {
     Instruction::new_with_bytes(
         rid(),
         &regions::instruction::CreateNewLocation {
             region_id,
             postcode: postcode.to_vec(),
+            max_deposit,
         }
         .data(),
         regions::accounts::CreateNewLocation {
@@ -802,6 +822,29 @@ pub fn create_location_ix(operator: &Pubkey, region_id: u16, postcode: &[u8]) ->
             location: location_pda(region_id, postcode),
             token_program: TOKEN_PROGRAM_ID,
             system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn remove_location_ix(operator: &Pubkey, region_id: u16, postcode: &[u8]) -> Instruction {
+    Instruction::new_with_bytes(
+        rid(),
+        &regions::instruction::RemoveLocation {
+            region_id,
+            postcode: postcode.to_vec(),
+        }
+        .data(),
+        regions::accounts::RemoveLocation {
+            operator: *operator,
+            config: regions_config(),
+            operator_role: role_pda(operator, Role::RegionalOperator),
+            xcav_mint: xcav_mint(),
+            operator_token: token_acc(operator),
+            vault: vault(),
+            region: region_pda(region_id),
+            location: location_pda(region_id, postcode),
+            token_program: TOKEN_PROGRAM_ID,
         }
         .to_account_metas(None),
     )

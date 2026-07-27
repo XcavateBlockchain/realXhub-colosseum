@@ -43,6 +43,7 @@ pub fn add_admin_handler(ctx: Context<AddAdmin>) -> Result<()> {
 
 /// Remove a whitelist admin and refund their account rent. Sudo-only.
 #[derive(Accounts)]
+#[instruction(admin_key: Pubkey)]
 pub struct RemoveAdmin<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
@@ -57,13 +58,13 @@ pub struct RemoveAdmin<'info> {
     #[account(
         mut,
         close = authority,
-        seeds = [ADMIN_SEED, admin.admin.as_ref()],
+        seeds = [ADMIN_SEED, admin_key.as_ref()],
         bump = admin.bump,
     )]
     pub admin: Account<'info, Admin>,
 }
 
-pub fn remove_admin_handler(ctx: Context<RemoveAdmin>) -> Result<()> {
+pub fn remove_admin_handler(ctx: Context<RemoveAdmin>, _admin_key: Pubkey) -> Result<()> {
     emit!(AdminRemoved {
         admin: ctx.accounts.admin.admin
     });

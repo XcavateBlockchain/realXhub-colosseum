@@ -40,8 +40,12 @@ pub mod marketplace {
         initialize::accept_authority_handler(ctx)
     }
 
-    pub fn register_lawyer(ctx: Context<RegisterLawyer>, region_id: u16) -> Result<()> {
-        lawyers::register_lawyer_handler(ctx, region_id)
+    pub fn register_lawyer(
+        ctx: Context<RegisterLawyer>,
+        region_id: u16,
+        max_deposit: u64,
+    ) -> Result<()> {
+        lawyers::register_lawyer_handler(ctx, region_id, max_deposit)
     }
 
     pub fn unregister_lawyer(ctx: Context<UnregisterLawyer>) -> Result<()> {
@@ -55,6 +59,7 @@ pub mod marketplace {
         share_price: u64,
         share_amount: u32,
         tax_paid_by_developer: bool,
+        max_deposit: u64,
     ) -> Result<()> {
         listing::list_property_handler(
             ctx,
@@ -63,6 +68,7 @@ pub mod marketplace {
             share_price,
             share_amount,
             tax_paid_by_developer,
+            max_deposit,
         )
     }
 
@@ -72,5 +78,18 @@ pub mod marketplace {
         new_price: u64,
     ) -> Result<()> {
         listing::upgrade_object_handler(ctx, listing_id, new_price)
+    }
+
+    pub fn init_property_assets(ctx: Context<InitPropertyAssets>, listing_id: u64) -> Result<()> {
+        assets::init_property_assets_handler(ctx, listing_id)
+    }
+
+    pub fn buy_property_shares(
+        ctx: Context<BuyPropertyShares>,
+        listing_id: u64,
+        amount: u32,
+        max_total_cost: u64,
+    ) -> Result<()> {
+        buy::buy_property_shares_handler(ctx, listing_id, amount, max_total_cost)
     }
 }

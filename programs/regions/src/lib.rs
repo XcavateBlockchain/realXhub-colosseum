@@ -44,9 +44,14 @@ pub mod regions {
         initialize::accept_authority_handler(ctx)
     }
 
-    /// Propose a new region. RegionalOperator-only; bonds 0.1% of XCAV supply.
-    pub fn propose_new_region(ctx: Context<ProposeNewRegion>, region_id: u16) -> Result<()> {
-        propose::propose_new_region_handler(ctx, region_id)
+    /// Propose a new region. RegionalOperator-only; bonds 0.1% of XCAV supply,
+    /// capped by the caller's `max_deposit`.
+    pub fn propose_new_region(
+        ctx: Context<ProposeNewRegion>,
+        region_id: u16,
+        max_deposit: u64,
+    ) -> Result<()> {
+        propose::propose_new_region_handler(ctx, region_id, max_deposit)
     }
 
     /// Vote on an open proposal. Anyone may vote; the amount is locked.
@@ -79,11 +84,15 @@ pub mod regions {
     }
 
     /// Claim an open region seat, bonding 0.1% of XCAV supply plus the region's
-    /// location deposits. First-come and RegionalOperator-only; the incumbent
-    /// may also call this to renew, paying only the difference if the bond has
-    /// moved since they last bonded.
-    pub fn claim_open_region(ctx: Context<ClaimOpenRegion>, region_id: u16) -> Result<()> {
-        create::claim_open_region_handler(ctx, region_id)
+    /// location deposits, capped by the caller's `max_deposit`. First-come and
+    /// RegionalOperator-only; the incumbent may also call this to renew, paying
+    /// only the difference if the bond has moved since they last bonded.
+    pub fn claim_open_region(
+        ctx: Context<ClaimOpenRegion>,
+        region_id: u16,
+        max_deposit: u64,
+    ) -> Result<()> {
+        create::claim_open_region_handler(ctx, region_id, max_deposit)
     }
 
     /// Reclaim locked voting XCAV after a proposal's voting window ends.
@@ -102,13 +111,24 @@ pub mod regions {
     }
 
     /// Register a postcode as a listable location. Region-operator-only;
-    /// locks a location deposit that joins the region's collateral.
+    /// locks a location deposit (capped by `max_deposit`) that joins the
+    /// region's collateral.
     pub fn create_new_location(
         ctx: Context<CreateNewLocation>,
         region_id: u16,
         postcode: Vec<u8>,
+        max_deposit: u64,
     ) -> Result<()> {
-        manage::create_new_location_handler(ctx, region_id, postcode)
+        manage::create_new_location_handler(ctx, region_id, postcode, max_deposit)
+    }
+
+    /// Deregister a postcode and release its recorded deposit. Region-operator-only.
+    pub fn remove_location(
+        ctx: Context<RemoveLocation>,
+        region_id: u16,
+        postcode: Vec<u8>,
+    ) -> Result<()> {
+        manage::remove_location_handler(ctx, region_id, postcode)
     }
 
     /// Change how long new listings in the region stay active. Region-operator-only.

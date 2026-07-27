@@ -14,3 +14,21 @@ pub const PROPERTY_SEED: &[u8] = b"property";
 
 #[constant]
 pub const LISTING_SEED: &[u8] = b"listing";
+
+#[constant]
+pub const SHARE_MINT_SEED: &[u8] = b"share-mint";
+
+#[constant]
+pub const MINT_AUTH_SEED: &[u8] = b"mint-auth";
+
+#[constant]
+pub const PROPERTY_VAULT_SEED: &[u8] = b"property-vault";
+
+#[constant]
+pub const SHARE_SEED: &[u8] = b"share";
+
+#[constant]
+pub const POSITION_SEED: &[u8] = b"position";
+
+#[constant]
+pub const LISTING_VAULT_SEED: &[u8] = b"listing-vault";

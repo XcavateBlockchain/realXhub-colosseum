@@ -259,3 +259,29 @@ fn upgrade_object_rejects_zero_price() {
         "InvalidSharePrice",
     );
 }
+
+#[test]
+fn list_rejects_deposit_above_cap() {
+    let (mut svm, _admin, _authority, developer) = setup_listing();
+    fails_with(
+        &mut svm,
+        list_ix_capped(&developer.pubkey(), 0, LISTING_DEPOSIT - 1),
+        &developer,
+        &[&developer],
+        "DepositTooHigh",
+    );
+}
+
+// A price below one base unit of the lowest-decimal accepted mint would floor
+// to a zero charge, so listing refuses it.
+#[test]
+fn list_rejects_price_below_min_scale() {
+    let (mut svm, _admin, _authority, developer) = setup_listing();
+    fails_with(
+        &mut svm,
+        list_property_ix(&developer.pubkey(), 0, 1, POSTCODE, 999, SHARE_AMOUNT),
+        &developer,
+        &[&developer],
+        "InvalidSharePrice",
+    );
+}

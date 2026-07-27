@@ -42,8 +42,8 @@ pub mod xcavate_whitelist {
     }
 
     /// Remove a whitelist admin. Sudo-only.
-    pub fn remove_admin(ctx: Context<RemoveAdmin>) -> Result<()> {
-        admin::remove_admin_handler(ctx)
+    pub fn remove_admin(ctx: Context<RemoveAdmin>, admin_key: Pubkey) -> Result<()> {
+        admin::remove_admin_handler(ctx, admin_key)
     }
 
     /// Assign a role to a user (default Compliant). Admin-only.

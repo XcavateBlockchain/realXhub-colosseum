@@ -54,6 +54,9 @@ pub struct Config {
     pub quorum: u64,
     /// Notice an operator must give before resigning (seconds).
     pub notice_period: i64,
+    /// Seconds before a proposal's expiry after which new votes are rejected,
+    /// so every vote's lock lasts at least this long.
+    pub min_vote_hold: i64,
     /// Longest listing duration an operator may set for their region (seconds).
     pub max_listing_duration: i64,
     /// Highest property tax an operator may set, in basis points.
@@ -71,9 +74,14 @@ pub struct Config {
 pub struct Region {
     pub region_id: u16,
     pub owner: Pubkey,
-    /// The operator's bonded XCAV plus one location deposit per registered
-    /// location, held in the vault. Returned when the seat changes hands.
+    /// The operator's bonded XCAV plus the location deposits, held in the
+    /// vault. Returned when the seat changes hands.
     pub collateral: u64,
+    /// The part of `collateral` backing the registered locations: the sum of
+    /// every `Location.deposit`. Takeovers and removals move these recorded
+    /// amounts, so the seat's bond stays exactly what was locked no matter
+    /// how the configured deposit changes in between.
+    pub location_collateral: u64,
     pub next_owner_change: i64,
     /// Seconds a property listing in this region stays active.
     pub listing_duration: i64,
@@ -95,6 +103,10 @@ pub struct RegionProposal {
     pub region_id: u16,
     pub created_at: i64,
     pub expiry: i64,
+    /// Votes are rejected from this moment on, so every vote's lock lasts at
+    /// least the configured minimum hold. Snapshotted at propose time; a
+    /// config change never shrinks an open proposal's window.
+    pub vote_cutoff: i64,
     pub yes_power: u64,
     pub no_power: u64,
     pub abstain_power: u64,
@@ -161,6 +173,9 @@ pub struct Location {
     /// The postcode, as seeded (uppercase ASCII, no spaces).
     #[max_len(POSTCODE_MAX_LEN)]
     pub postcode: Vec<u8>,
+    /// The XCAV locked when the location was registered. Released on removal,
+    /// even if the configured deposit has changed since.
+    pub deposit: u64,
     pub bump: u8,
 }
 

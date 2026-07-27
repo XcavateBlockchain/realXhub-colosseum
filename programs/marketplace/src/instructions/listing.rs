@@ -3,7 +3,9 @@ use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
 use crate::constants::{CONFIG_SEED, LISTING_SEED, PROPERTY_SEED, VAULT_SEED};
 use crate::error::MarketplaceError;
-use crate::state::{Config, Listing, ListingStatus, PropertyAsset};
+use crate::state::{
+    Config, Listing, ListingStatus, PropertyAsset, MIN_PAYMENT_DECIMALS, PRICE_DECIMALS,
+};
 use crate::vault::lock_to_vault;
 
 use xcavate_whitelist::state::{Role, RoleAccount};
@@ -85,7 +87,7 @@ pub struct ListProperty<'info> {
     )]
     pub developer_token: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// The protocol's XCAV escrow vault.
+    /// The protocol's XCAV vault.
     #[account(
         mut,
         seeds = [VAULT_SEED],
@@ -106,6 +108,7 @@ pub fn list_property_handler(
     share_price: u64,
     share_amount: u32,
     tax_paid_by_developer: bool,
+    max_deposit: u64,
 ) -> Result<()> {
     let config = &ctx.accounts.config;
     require!(
@@ -113,6 +116,12 @@ pub fn list_property_handler(
         MarketplaceError::InvalidShareAmount
     );
     require!(share_price > 0, MarketplaceError::InvalidSharePrice);
+    // A share must still charge something after rescaling to the
+    // lowest-decimal accepted payment mint.
+    require!(
+        share_price >= 10u64.pow((PRICE_DECIMALS - MIN_PAYMENT_DECIMALS) as u32),
+        MarketplaceError::InvalidSharePrice
+    );
     // The full property must stay priceable in u64 for settlement math.
     share_price
         .checked_mul(share_amount as u64)
@@ -120,6 +129,9 @@ pub fn list_property_handler(
 
     let listing_id = config.next_listing_id;
     let deposit = config.listing_deposit;
+    // The deposit is read from live config; the caller caps what they are
+    // willing to pay so an update can't reprice their signed transaction.
+    require!(deposit <= max_deposit, MarketplaceError::DepositTooHigh);
     let now = Clock::get()?.unix_timestamp;
     let listing_expiry = now
         .checked_add(ctx.accounts.region.listing_duration)
@@ -156,6 +168,9 @@ pub fn list_property_handler(
     listing.sold_share_amount = 0;
     listing.tax_paid_by_developer = tax_paid_by_developer;
     listing.tax_bps = ctx.accounts.region.tax_bps;
+    listing.marketplace_fee_bps = config.marketplace_fee_bps;
+    listing.investor_fee_bps = config.investor_fee_bps;
+    listing.max_ownership_bps = config.max_ownership_bps;
     listing.listing_expiry = listing_expiry;
     listing.deposit = deposit;
     listing.status = ListingStatus::PendingAssets;

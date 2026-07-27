@@ -61,7 +61,7 @@ pub struct RegisterLawyer<'info> {
     )]
     pub lawyer_token: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// The protocol's XCAV escrow vault.
+    /// The protocol's XCAV vault.
     #[account(
         mut,
         seeds = [VAULT_SEED],
@@ -75,8 +75,15 @@ pub struct RegisterLawyer<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn register_lawyer_handler(ctx: Context<RegisterLawyer>, region_id: u16) -> Result<()> {
+pub fn register_lawyer_handler(
+    ctx: Context<RegisterLawyer>,
+    region_id: u16,
+    max_deposit: u64,
+) -> Result<()> {
     let deposit = ctx.accounts.config.lawyer_deposit;
+    // The deposit is read from live config; the caller caps what they are
+    // willing to pay so an update can't reprice their signed transaction.
+    require!(deposit <= max_deposit, MarketplaceError::DepositTooHigh);
     lock_to_vault(
         &ctx.accounts.token_program.to_account_info(),
         &ctx.accounts.lawyer_token.to_account_info(),
@@ -103,7 +110,10 @@ pub fn register_lawyer_handler(ctx: Context<RegisterLawyer>, region_id: u16) -> 
 }
 
 /// Leave the lawyer registry. Blocked while the lawyer has active cases; the
-/// deposit recorded at registration is returned.
+/// deposit recorded at registration is returned. Deliberately not role-gated:
+/// this is a pure exit, and a lawyer whose role was revoked must still be able
+/// to reclaim their deposit. The registry PDA seeded by the wallet proves who
+/// the caller is.
 #[derive(Accounts)]
 pub struct UnregisterLawyer<'info> {
     #[account(mut)]
@@ -111,18 +121,6 @@ pub struct UnregisterLawyer<'info> {
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Box<Account<'info, Config>>,
-
-    /// The caller's Lawyer role, owned by the roles program.
-    #[account(
-        seeds = [
-            xcavate_whitelist::ROLE_SEED,
-            lawyer.key().as_ref(),
-            &[Role::Lawyer.seed_byte()],
-        ],
-        bump = lawyer_role.bump,
-        seeds::program = xcavate_whitelist::ID,
-    )]
-    pub lawyer_role: Box<Account<'info, RoleAccount>>,
 
     #[account(
         mut,
@@ -145,7 +143,7 @@ pub struct UnregisterLawyer<'info> {
     )]
     pub lawyer_token: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// The protocol's XCAV escrow vault.
+    /// The protocol's XCAV vault.
     #[account(
         mut,
         seeds = [VAULT_SEED],

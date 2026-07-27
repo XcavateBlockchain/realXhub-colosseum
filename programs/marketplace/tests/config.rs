@@ -33,7 +33,7 @@ fn init_sets_fields() {
     assert_eq!(cfg.authority, authority.pubkey());
     assert_eq!(cfg.pending_authority, None);
     assert_eq!(cfg.xcav_mint, xcav_mint());
-    assert_eq!(cfg.accepted_payment_mints, vec![tgbp_mint()]);
+    assert_eq!(cfg.accepted_payment_mints, vec![tgbp_mint(), gbp6_mint()]);
     assert_eq!(cfg.listing_deposit, LISTING_DEPOSIT);
     assert_eq!(cfg.lawyer_deposit, LAWYER_DEPOSIT);
     assert_eq!(cfg.max_property_shares, 100);
@@ -279,5 +279,46 @@ fn update_authority_reproposal_overwrites_pending() {
         accept_authority_ix(&second.pubkey()),
         &second,
         &[&second],
+    );
+}
+
+// The mint guard runs on every accepted payment mint at config time, so a
+// fee-bearing entry can't silently break vault accounting later.
+#[test]
+fn init_rejects_unsupported_payment_mint() {
+    let (mut svm, authority) = pre_init();
+    let fee_mint = Pubkey::new_from_array([21u8; 32]);
+    set_fee_bearing_mint(&mut svm, fee_mint);
+
+    let mut params = default_params();
+    params.accepted_payment_mints = vec![fee_mint];
+    fails_with(
+        &mut svm,
+        init_ix_with(&authority.pubkey(), params),
+        &authority,
+        &[&authority],
+        "UnsupportedMintExtension",
+    );
+}
+
+#[test]
+fn init_requires_payment_mint_accounts() {
+    let (mut svm, authority) = pre_init();
+    // Drop the trailing payment-mint account from the instruction.
+    let mut ix = init_ix(&authority.pubkey());
+    ix.accounts.pop();
+    fails_with(&mut svm, ix, &authority, &[&authority], "InvalidConfig");
+}
+
+#[test]
+fn init_rejects_xcav_with_lock_authority() {
+    let (mut svm, authority) = pre_init();
+    set_mint_with_lock_authority(&mut svm, xcav_mint());
+    fails_with(
+        &mut svm,
+        init_ix(&authority.pubkey()),
+        &authority,
+        &[&authority],
+        "UnsupportedMintAuthority",
     );
 }

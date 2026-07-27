@@ -14,6 +14,7 @@ pub struct ConfigParams {
     pub threshold_bps: u16,
     pub quorum: u64,
     pub notice_period: i64,
+    pub min_vote_hold: i64,
     pub max_listing_duration: i64,
     pub max_tax_bps: u16,
     pub location_deposit: u64,
@@ -35,6 +36,12 @@ impl ConfigParams {
         );
         require!(self.minimum_voting_amount > 0, RegionsError::InvalidConfig);
         require!(self.notice_period > 0, RegionsError::InvalidConfig);
+        // Zero would silently switch the anti-borrow protection off, and a
+        // hold as long as the window would make every proposal unvotable.
+        require!(
+            self.min_vote_hold > 0 && self.min_vote_hold < self.voting_period,
+            RegionsError::InvalidConfig
+        );
         require!(self.max_listing_duration > 0, RegionsError::InvalidConfig);
         require!(self.max_tax_bps <= 10_000, RegionsError::InvalidConfig);
         require!(self.location_deposit > 0, RegionsError::InvalidConfig);
@@ -48,6 +55,7 @@ impl ConfigParams {
         config.threshold_bps = self.threshold_bps;
         config.quorum = self.quorum;
         config.notice_period = self.notice_period;
+        config.min_vote_hold = self.min_vote_hold;
         config.max_listing_duration = self.max_listing_duration;
         config.max_tax_bps = self.max_tax_bps;
         config.location_deposit = self.location_deposit;
@@ -82,7 +90,7 @@ pub struct InitializeConfig<'info> {
     /// The XCAV governance mint the protocol stakes.
     pub xcav_mint: Box<InterfaceAccount<'info, Mint>>,
 
-    /// The protocol's XCAV escrow vault, owned by the config PDA.
+    /// The protocol's XCAV vault, owned by the config PDA.
     #[account(
         init,
         payer = authority,

@@ -4,7 +4,7 @@ use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 use crate::constants::{CONFIG_SEED, LOCATION_SEED, REGION_SEED, VAULT_SEED};
 use crate::error::RegionsError;
 use crate::state::{Config, Location, Region, POSTCODE_MAX_LEN};
-use crate::vault::lock_to_vault;
+use crate::vault::{lock_to_vault, release_from_vault};
 
 use xcavate_whitelist::state::{Role, RoleAccount};
 
@@ -44,7 +44,7 @@ pub struct CreateNewLocation<'info> {
     )]
     pub operator_token: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// The protocol's XCAV escrow vault.
+    /// The protocol's XCAV vault.
     #[account(
         mut,
         seeds = [VAULT_SEED],
@@ -81,6 +81,7 @@ pub fn create_new_location_handler(
     ctx: Context<CreateNewLocation>,
     region_id: u16,
     postcode: Vec<u8>,
+    max_deposit: u64,
 ) -> Result<()> {
     // Uppercase alphanumeric ASCII only, so "sw1a1aa" and "SW1A1AA" can't
     // register as two different locations. The frontend strips spaces.
@@ -92,8 +93,15 @@ pub fn create_new_location_handler(
                 .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()),
         RegionsError::InvalidPostcode
     );
+    // Once the seat is open the incumbent is a lame duck: letting them add
+    // locations then would reprice the takeover for every challenger.
+    require!(
+        Clock::get()?.unix_timestamp < ctx.accounts.region.next_owner_change,
+        RegionsError::SeatOpen
+    );
 
     let deposit = ctx.accounts.config.location_deposit;
+    require!(deposit <= max_deposit, RegionsError::DepositTooHigh);
     lock_to_vault(
         &ctx.accounts.token_program.to_account_info(),
         &ctx.accounts.operator_token.to_account_info(),
@@ -109,6 +117,10 @@ pub fn create_new_location_handler(
         .collateral
         .checked_add(deposit)
         .ok_or(RegionsError::Overflow)?;
+    region.location_collateral = region
+        .location_collateral
+        .checked_add(deposit)
+        .ok_or(RegionsError::Overflow)?;
     region.location_count = region
         .location_count
         .checked_add(1)
@@ -117,9 +129,121 @@ pub fn create_new_location_handler(
     let location = &mut ctx.accounts.location;
     location.region_id = region_id;
     location.postcode = postcode.clone();
+    location.deposit = deposit;
     location.bump = ctx.bumps.location;
 
     emit!(LocationCreated {
+        region_id,
+        postcode,
+        new_collateral: region.collateral,
+        location_count: region.location_count,
+    });
+    Ok(())
+}
+
+/// Deregister a postcode and release its recorded deposit back to the
+/// operator. Operator-only, and blocked while the seat is open, mirroring
+/// create. New listings can no longer cite the postcode; live listings keep
+/// the copy they snapshotted.
+#[derive(Accounts)]
+#[instruction(region_id: u16, postcode: Vec<u8>)]
+pub struct RemoveLocation<'info> {
+    #[account(mut)]
+    pub operator: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+
+    #[account(
+        seeds = [
+            xcavate_whitelist::ROLE_SEED,
+            operator.key().as_ref(),
+            &[Role::RegionalOperator.seed_byte()],
+        ],
+        bump = operator_role.bump,
+        seeds::program = xcavate_whitelist::ID,
+    )]
+    pub operator_role: Box<Account<'info, RoleAccount>>,
+
+    /// The XCAV mint (for `transfer_checked`).
+    #[account(address = config.xcav_mint @ RegionsError::InvalidMint)]
+    pub xcav_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    /// The operator's XCAV account the deposit is returned to.
+    #[account(
+        mut,
+        token::mint = config.xcav_mint,
+        token::authority = operator,
+    )]
+    pub operator_token: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// The protocol's XCAV vault.
+    #[account(
+        mut,
+        seeds = [VAULT_SEED],
+        bump,
+        token::mint = config.xcav_mint,
+        token::authority = config,
+    )]
+    pub vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        seeds = [REGION_SEED, &region_id.to_le_bytes()],
+        bump = region.bump,
+        constraint = region.owner == operator.key() @ RegionsError::NotRegionOwner,
+    )]
+    pub region: Box<Account<'info, Region>>,
+
+    #[account(
+        mut,
+        close = operator,
+        seeds = [LOCATION_SEED, &region_id.to_le_bytes(), postcode.as_slice()],
+        bump = location.bump,
+    )]
+    pub location: Box<Account<'info, Location>>,
+
+    pub token_program: Interface<'info, TokenInterface>,
+}
+
+pub fn remove_location_handler(
+    ctx: Context<RemoveLocation>,
+    region_id: u16,
+    postcode: Vec<u8>,
+) -> Result<()> {
+    // Same lame-duck rule as create: an open seat's collateral is spoken for.
+    require!(
+        Clock::get()?.unix_timestamp < ctx.accounts.region.next_owner_change,
+        RegionsError::SeatOpen
+    );
+
+    let deposit = ctx.accounts.location.deposit;
+    release_from_vault(
+        &ctx.accounts.token_program.to_account_info(),
+        &ctx.accounts.vault.to_account_info(),
+        &ctx.accounts.xcav_mint.to_account_info(),
+        &ctx.accounts.operator_token.to_account_info(),
+        &ctx.accounts.config.to_account_info(),
+        ctx.accounts.config.bump,
+        deposit,
+        ctx.accounts.xcav_mint.decimals,
+    )?;
+
+    let region = &mut ctx.accounts.region;
+    region.collateral = region
+        .collateral
+        .checked_sub(deposit)
+        .ok_or(RegionsError::Overflow)?;
+    region.location_collateral = region
+        .location_collateral
+        .checked_sub(deposit)
+        .ok_or(RegionsError::Overflow)?;
+    region.location_count = region
+        .location_count
+        .checked_sub(1)
+        .ok_or(RegionsError::Overflow)?;
+
+    emit!(LocationRemoved {
         region_id,
         postcode,
         new_collateral: region.collateral,
@@ -198,6 +322,14 @@ pub fn adjust_region_tax_handler(
 
 #[event]
 pub struct LocationCreated {
+    pub region_id: u16,
+    pub postcode: Vec<u8>,
+    pub new_collateral: u64,
+    pub location_count: u32,
+}
+
+#[event]
+pub struct LocationRemoved {
     pub region_id: u16,
     pub postcode: Vec<u8>,
     pub new_collateral: u64,

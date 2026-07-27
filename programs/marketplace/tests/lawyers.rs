@@ -216,3 +216,53 @@ fn unregister_without_registration_fails() {
         "AccountNotInitialized",
     );
 }
+
+#[test]
+fn register_rejects_deposit_above_cap() {
+    let (mut svm, admin, _authority) = setup_with_region();
+    let lawyer = new_lawyer(&mut svm, &admin);
+    fails_with(
+        &mut svm,
+        register_lawyer_ix_capped(&lawyer.pubkey(), 1, LAWYER_DEPOSIT - 1),
+        &lawyer,
+        &[&lawyer],
+        "DepositTooHigh",
+    );
+}
+
+// Unregistering is an exit path: it works even after the lawyer's role is
+// revoked, so an admin action can never strand the deposit.
+#[test]
+fn unregister_works_after_role_removed() {
+    let (mut svm, admin, _authority) = setup_with_region();
+    let lawyer = new_lawyer(&mut svm, &admin);
+    ok(
+        &mut svm,
+        register_lawyer_ix(&lawyer.pubkey(), 1),
+        &lawyer,
+        &[&lawyer],
+    );
+    ok(
+        &mut svm,
+        roles_remove_ix(
+            &admin.pubkey(),
+            &lawyer.pubkey(),
+            Role::Lawyer,
+            &admin.pubkey(),
+        ),
+        &admin,
+        &[&admin],
+    );
+
+    let before = xcav_balance(&svm, &lawyer.pubkey());
+    ok(
+        &mut svm,
+        unregister_lawyer_ix(&lawyer.pubkey()),
+        &lawyer,
+        &[&lawyer],
+    );
+    assert_eq!(
+        xcav_balance(&svm, &lawyer.pubkey()) - before,
+        LAWYER_DEPOSIT
+    );
+}

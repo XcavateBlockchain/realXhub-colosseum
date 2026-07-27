@@ -1,8 +1,8 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{ADMIN_SEED, CONFIG_SEED, ROLE_SEED};
+use crate::constants::{ADMIN_SEED, ROLE_SEED};
 use crate::error::WhitelistError;
-use crate::state::{AccessPermission, Admin, Config, Role, RoleAccount};
+use crate::state::{AccessPermission, Admin, Role, RoleAccount};
 
 /// Grant a role to a user. The assignment starts compliant. Admin-only.
 #[derive(Accounts)]
@@ -38,6 +38,7 @@ pub fn assign_role_handler(ctx: Context<AssignRole>, role: Role) -> Result<()> {
     role_account.user = ctx.accounts.user.key();
     role_account.role = role;
     role_account.permission = AccessPermission::Compliant;
+    role_account.rent_payer = ctx.accounts.admin_signer.key();
     role_account.bump = ctx.bumps.role_account;
 
     emit!(RoleAssigned {
@@ -47,11 +48,11 @@ pub fn assign_role_handler(ctx: Context<AssignRole>, role: Role) -> Result<()> {
     Ok(())
 }
 
-/// Revoke a role entirely and refund the account rent to the admin. Admin-only.
+/// Revoke a role entirely. Admin-only; the account rent goes back to whoever
+/// paid it at assignment, not necessarily the removing admin.
 #[derive(Accounts)]
 #[instruction(role: Role)]
 pub struct RemoveRole<'info> {
-    #[account(mut)]
     pub admin_signer: Signer<'info>,
 
     #[account(
@@ -63,9 +64,16 @@ pub struct RemoveRole<'info> {
     /// CHECK: the user losing the role; used as PDA seed only.
     pub user: UncheckedAccount<'info>,
 
+    /// CHECK: rent destination, fixed to whoever paid at assignment.
     #[account(
         mut,
-        close = admin_signer,
+        address = role_account.rent_payer @ WhitelistError::WrongRentPayer,
+    )]
+    pub rent_payer: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        close = rent_payer,
         seeds = [ROLE_SEED, user.key().as_ref(), &[role.seed_byte()]],
         bump = role_account.bump,
     )]
@@ -80,22 +88,23 @@ pub fn remove_role_handler(ctx: Context<RemoveRole>, role: Role) -> Result<()> {
     Ok(())
 }
 
-/// Give up one's own role and refund the account rent to the authority. Holder-signed.
+/// Give up one's own role. Holder-signed; the account rent goes back to the
+/// admin who paid it at assignment.
 #[derive(Accounts)]
 #[instruction(role: Role)]
 pub struct RenounceRole<'info> {
     pub user: Signer<'info>,
 
-    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Account<'info, Config>,
-
-    /// CHECK: rent destination, fixed to the configured authority.
-    #[account(mut, address = config.authority)]
-    pub authority: UncheckedAccount<'info>,
+    /// CHECK: rent destination, fixed to whoever paid at assignment.
+    #[account(
+        mut,
+        address = role_account.rent_payer @ WhitelistError::WrongRentPayer,
+    )]
+    pub rent_payer: UncheckedAccount<'info>,
 
     #[account(
         mut,
-        close = authority,
+        close = rent_payer,
         seeds = [ROLE_SEED, user.key().as_ref(), &[role.seed_byte()]],
         bump = role_account.bump,
     )]

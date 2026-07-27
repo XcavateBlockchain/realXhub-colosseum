@@ -14,7 +14,7 @@ pub enum MarketplaceError {
     /// The signer does not match the pending authority proposal.
     #[msg("Signer is not the pending authority")]
     NotPendingAuthority,
-    /// The mint carries a token extension the escrow accounting cannot support.
+    /// The mint carries a token extension the vault accounting cannot support.
     #[msg("Unsupported token extension on mint")]
     UnsupportedMintExtension,
     /// The supplied mint is not the configured XCAV mint.
@@ -47,4 +47,28 @@ pub enum MarketplaceError {
     /// Arithmetic overflow.
     #[msg("Arithmetic overflow")]
     Overflow,
+    /// The mint has an authority that could lock vaulted funds.
+    #[msg("Unsupported mint authority")]
+    UnsupportedMintAuthority,
+    /// The computed deposit is above the caller's stated maximum.
+    #[msg("Deposit exceeds the caller's maximum")]
+    DepositTooHigh,
+    /// The payment mint is not on the accepted list.
+    #[msg("Payment mint is not accepted")]
+    MintNotAccepted,
+    /// The position was cancelled by an unreserve; re-buying is barred.
+    #[msg("Position was cancelled and cannot buy again")]
+    PositionCancelled,
+    /// The purchase would push the investor over the ownership cap.
+    #[msg("Purchase exceeds the ownership cap")]
+    MaxOwnershipExceeded,
+    /// The total cost is above the caller's stated maximum.
+    #[msg("Cost exceeds the caller's maximum")]
+    CostTooHigh,
+    /// The position was paid in a different mint.
+    #[msg("Position uses a different payment mint")]
+    PaymentMintMismatch,
+    /// The rent payer is not the configured rent collector.
+    #[msg("Payer is not the rent collector")]
+    NotRentCollector,
 }
