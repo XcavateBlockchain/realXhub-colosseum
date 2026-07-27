@@ -1,0 +1,260 @@
+//! Locations and region settings: postcode registration with its deposit,
+//! listing-duration and tax setters, and how location deposits follow the seat.
+
+mod common;
+use common::*;
+
+use regions::state::Location;
+
+fn created_region(svm: &mut LiteSVM, operator: &Keypair, authority: &Keypair) {
+    reach_created(svm, operator, authority);
+}
+
+#[test]
+fn create_location_works() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    let vault_before = vault_balance(&svm);
+    let operator_before = xcav_balance(&svm, &operator.pubkey());
+
+    ok(
+        &mut svm,
+        create_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+    );
+
+    let acc = svm.get_account(&location_pda(1, b"SW1A1AA")).unwrap();
+    let location = Location::try_deserialize(&mut &acc.data[..]).unwrap();
+    assert_eq!(location.region_id, 1);
+    assert_eq!(location.postcode, b"SW1A1AA");
+
+    // The deposit moved into the vault and joined the region's collateral.
+    assert_eq!(vault_balance(&svm) - vault_before, LOCATION_DEPOSIT);
+    assert_eq!(
+        operator_before - xcav_balance(&svm, &operator.pubkey()),
+        LOCATION_DEPOSIT
+    );
+    let region = region_of(&svm, 1);
+    assert_eq!(region.collateral, DEPOSIT + LOCATION_DEPOSIT);
+    assert_eq!(region.location_count, 1);
+}
+
+#[test]
+fn create_location_twice_fails() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    ok(
+        &mut svm,
+        create_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+    );
+    // The location PDA already exists, so init refuses the duplicate.
+    fails_with(
+        &mut svm,
+        create_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+        "already in use",
+    );
+}
+
+#[test]
+fn create_location_requires_region_owner() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    // Another compliant operator, but not this region's owner.
+    let other = new_operator(&mut svm, &authority);
+    fails_with(
+        &mut svm,
+        create_location_ix(&other.pubkey(), 1, b"SW1A1AA"),
+        &other,
+        &[&other],
+        "NotRegionOwner",
+    );
+}
+
+#[test]
+fn create_location_rejects_bad_postcodes() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    let cases: [&[u8]; 4] = [b"", b"sw1a1aa", b"SW1A 1AA", b"ABCDEFGHIJK"];
+    for postcode in cases {
+        fails_with(
+            &mut svm,
+            create_location_ix(&operator.pubkey(), 1, postcode),
+            &operator,
+            &[&operator],
+            "InvalidPostcode",
+        );
+    }
+}
+
+// Regions checks role possession only. The compliance
+// flag gates the marketplace's investor-fund flows, not region administration,
+// so an operator whose flag is revoked keeps running their region.
+#[test]
+fn create_location_ignores_compliance_flag() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    set_permission(
+        &mut svm,
+        &authority,
+        &operator.pubkey(),
+        Role::RegionalOperator,
+        false,
+    );
+    ok(
+        &mut svm,
+        create_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+    );
+}
+
+#[test]
+fn adjust_listing_duration_works() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    assert_eq!(region_of(&svm, 1).listing_duration, LISTING_DURATION);
+
+    ok(
+        &mut svm,
+        adjust_duration_ix(&operator.pubkey(), 1, 200_000),
+        &operator,
+        &[&operator],
+    );
+    assert_eq!(region_of(&svm, 1).listing_duration, 200_000);
+}
+
+#[test]
+fn adjust_listing_duration_validates_bounds() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    // default max_listing_duration is 1_000_000
+    for bad in [0i64, 1_000_001] {
+        fails_with(
+            &mut svm,
+            adjust_duration_ix(&operator.pubkey(), 1, bad),
+            &operator,
+            &[&operator],
+            "InvalidListingDuration",
+        );
+    }
+}
+
+#[test]
+fn adjust_tax_works_and_validates() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    assert_eq!(region_of(&svm, 1).tax_bps, TAX_BPS);
+
+    ok(
+        &mut svm,
+        adjust_tax_ix(&operator.pubkey(), 1, 500),
+        &operator,
+        &[&operator],
+    );
+    assert_eq!(region_of(&svm, 1).tax_bps, 500);
+
+    // default max_tax_bps is 1_000
+    fails_with(
+        &mut svm,
+        adjust_tax_ix(&operator.pubkey(), 1, 1_001),
+        &operator,
+        &[&operator],
+        "TaxTooHigh",
+    );
+}
+
+#[test]
+fn adjust_setters_require_region_owner() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    let other = new_operator(&mut svm, &authority);
+    fails_with(
+        &mut svm,
+        adjust_duration_ix(&other.pubkey(), 1, 200_000),
+        &other,
+        &[&other],
+        "NotRegionOwner",
+    );
+    fails_with(
+        &mut svm,
+        adjust_tax_ix(&other.pubkey(), 1, 500),
+        &other,
+        &[&other],
+        "NotRegionOwner",
+    );
+}
+
+#[test]
+fn create_region_validates_initial_settings() {
+    let (mut svm, operator, authority) = setup();
+    reach_passed(&mut svm, &operator, &authority);
+    fails_with(
+        &mut svm,
+        create_region_ix_with(&operator.pubkey(), 1, 0, TAX_BPS),
+        &operator,
+        &[&operator],
+        "InvalidListingDuration",
+    );
+    fails_with(
+        &mut svm,
+        create_region_ix_with(&operator.pubkey(), 1, LISTING_DURATION, 1_001),
+        &operator,
+        &[&operator],
+        "TaxTooHigh",
+    );
+    // Valid settings still claim the passed region.
+    ok(
+        &mut svm,
+        create_region_ix_with(&operator.pubkey(), 1, LISTING_DURATION, TAX_BPS),
+        &operator,
+        &[&operator],
+    );
+}
+
+#[test]
+fn seat_takeover_covers_location_deposits() {
+    let (mut svm, operator, authority) = setup();
+    created_region(&mut svm, &operator, &authority);
+    ok(
+        &mut svm,
+        create_location_ix(&operator.pubkey(), 1, b"SW1A1AA"),
+        &operator,
+        &[&operator],
+    );
+    ok(
+        &mut svm,
+        resign_ix(&operator.pubkey(), 1),
+        &operator,
+        &[&operator],
+    );
+    warp(&mut svm, 6_000);
+
+    // The new operator must bond the base bond plus the location deposit, and
+    // the outgoing operator gets their full collateral (bond + location) back.
+    let new_op = new_operator(&mut svm, &authority);
+    let old_before = xcav_balance(&svm, &operator.pubkey());
+    let new_before = xcav_balance(&svm, &new_op.pubkey());
+    ok(
+        &mut svm,
+        claim_open_region_ix(&new_op.pubkey(), 1, &operator.pubkey()),
+        &new_op,
+        &[&new_op],
+    );
+
+    let region = region_of(&svm, 1);
+    assert_eq!(region.owner, new_op.pubkey());
+    assert_eq!(region.collateral, DEPOSIT + LOCATION_DEPOSIT);
+    assert_eq!(
+        xcav_balance(&svm, &operator.pubkey()) - old_before,
+        DEPOSIT + LOCATION_DEPOSIT
+    );
+    assert_eq!(
+        new_before - xcav_balance(&svm, &new_op.pubkey()),
+        DEPOSIT + LOCATION_DEPOSIT
+    );
+}

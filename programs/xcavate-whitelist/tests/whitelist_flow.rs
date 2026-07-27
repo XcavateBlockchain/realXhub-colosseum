@@ -339,7 +339,7 @@ fn remove_admin_works() {
     );
     assert!(svm
         .get_account(&admin_pda(&admin.pubkey()))
-        .map_or(true, |a| a.data.is_empty()));
+        .is_none_or(|a| a.data.is_empty()));
 }
 
 #[test]
@@ -388,7 +388,7 @@ fn assign_role_works() {
     // A role that was never granted has no account.
     assert!(svm
         .get_account(&role_pda(&user, Role::LettingAgent))
-        .map_or(true, |a| a.data.is_empty()));
+        .is_none_or(|a| a.data.is_empty()));
 }
 
 #[test]
@@ -444,7 +444,7 @@ fn remove_role_works() {
     );
     assert!(svm
         .get_account(&role_pda(&user, Role::RealEstateInvestor))
-        .map_or(true, |a| a.data.is_empty()));
+        .is_none_or(|a| a.data.is_empty()));
 }
 
 #[test]
@@ -505,7 +505,7 @@ fn renounce_role_works() {
     );
     assert!(svm
         .get_account(&role_pda(&user.pubkey(), Role::Lawyer))
-        .map_or(true, |a| a.data.is_empty()));
+        .is_none_or(|a| a.data.is_empty()));
     assert!(svm.get_account(&authority.pubkey()).unwrap().lamports > auth_before);
     assert!(svm.get_account(&user.pubkey()).unwrap().lamports <= user_before);
 }
@@ -516,7 +516,11 @@ fn renounce_role_fails_when_not_assigned() {
     let user = funded(&mut svm);
     fails_with(
         &mut svm,
-        renounce_ix(&user.pubkey(), &authority.pubkey(), Role::RealEstateInvestor),
+        renounce_ix(
+            &user.pubkey(),
+            &authority.pubkey(),
+            Role::RealEstateInvestor,
+        ),
         &user,
         &[&user],
         "AccountNotInitialized",

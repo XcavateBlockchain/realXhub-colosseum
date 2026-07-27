@@ -1,0 +1,38 @@
+[package]
+name = "regions"
+version = "0.1.0"
+description = "Region governance, locations, and lawyer registry for the realXmarket protocol"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "regions"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+
+[dependencies]
+anchor-lang = { workspace = true, features = ["init-if-needed"] }
+anchor-spl = { workspace = true }
+xcavate-whitelist = { path = "../xcavate-whitelist", features = ["cpi"] }
+
+[dev-dependencies]
+litesvm = { workspace = true }
+solana-message = { workspace = true }
+solana-transaction = { workspace = true }
+solana-signer = { workspace = true }
+solana-keypair = { workspace = true }
+solana-account = { workspace = true }
+
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
