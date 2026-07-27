@@ -1,12 +1,12 @@
 [package]
-name = "regions"
+name = "marketplace"
 version = "0.1.0"
-description = "Region governance, operator seats, and locations for the realXmarket protocol"
+description = "Property listings, fractional share sales, and legal settlement for the realXmarket protocol"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "regions"
+name = "marketplace"
 
 [features]
 default = []
@@ -24,6 +24,7 @@ custom-panic = []
 anchor-lang = { workspace = true, features = ["init-if-needed"] }
 anchor-spl = { workspace = true }
 xcavate-whitelist = { path = "../xcavate-whitelist", features = ["cpi"] }
+regions = { path = "../regions", features = ["no-entrypoint"] }
 
 [dev-dependencies]
 litesvm = { workspace = true }

@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-realxmarket_solana = "5hx9xomHjGRpzsX4v5UuE98554Pb6vqNqwUHqT6T87A4"
+marketplace = "B6YRVAmjmhN28smZxNfCnuKc19CamBbAEMXsp5KTfWog"
 xcavate-whitelist = "2vVARM46pPD4rcHdbXHnYA4vTGN14q6skQAzsQWcHUxn"
 regions = "FYysH5v23qtz4gK4H1yLDHneFwx6PSAT7oQwHcuRyRh"
 
