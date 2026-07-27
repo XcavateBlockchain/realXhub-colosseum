@@ -1,5 +1,7 @@
 use anchor_lang::prelude::*;
 
+pub use regions::state::POSTCODE_MAX_LEN;
+
 /// Most payment mints the protocol accepts at once.
 pub const MAX_PAYMENT_MINTS: usize = 4;
 
@@ -51,6 +53,78 @@ pub struct Config {
     pub min_voting_quorum_bps: u16,
     /// Monotonic id for the next listing.
     pub next_listing_id: u64,
+    pub bump: u8,
+}
+
+/// Where a primary listing is in its lifecycle.
+#[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ListingStatus {
+    /// Created, but the Core asset and share mint don't exist yet.
+    PendingAssets,
+    /// Open for share purchases.
+    Listed,
+    /// Every share sold; the legal process can start.
+    SoldOut,
+    /// Lawyers are confirming the sale documents.
+    Legal,
+    /// Settled; the property is live.
+    Finalized,
+    /// Expired before selling out; refunds open.
+    Expired,
+    /// Cancelled (e.g. the NoLawyer vote won); refunds open.
+    Cancelled,
+    /// Being torn down; waiting for the last holder to withdraw.
+    Refunding,
+}
+
+/// A fractionalized property. Created when it is listed and kept for the
+/// asset's whole life; the Core asset and share mint are attached by
+/// `init_property_assets`.
+#[account]
+#[derive(InitSpace)]
+pub struct PropertyAsset {
+    pub asset_id: u64,
+    /// The Metaplex Core asset held in the property vault. Default until the
+    /// assets are initialized.
+    pub core_asset: Pubkey,
+    /// The Token-2022 share mint. Default until the assets are initialized.
+    pub share_mint: Pubkey,
+    pub region_id: u16,
+    /// The registered location (postcode) the property sits in.
+    #[max_len(POSTCODE_MAX_LEN)]
+    pub location: Vec<u8>,
+    pub share_amount: u32,
+    pub spv_created: bool,
+    pub finalized: bool,
+    /// Wallets currently holding shares; teardown completes when it reaches
+    /// zero again.
+    pub holder_count: u32,
+    pub bump: u8,
+}
+
+/// A primary property listing. Prices and windows are snapshotted here at
+/// listing time, so config or region changes never reprice a sale underway.
+#[account]
+#[derive(InitSpace)]
+pub struct Listing {
+    pub listing_id: u64,
+    pub developer: Pubkey,
+    pub asset_id: u64,
+    /// Price per share, in payment-mint base units.
+    pub share_price: u64,
+    /// Shares put up for sale.
+    pub listed_share_amount: u32,
+    /// Shares sold so far.
+    pub sold_share_amount: u32,
+    /// Whether the developer covers the region's sale tax themselves.
+    pub tax_paid_by_developer: bool,
+    /// The region's sale tax at listing time, in basis points.
+    pub tax_bps: u16,
+    pub listing_expiry: i64,
+    /// The XCAV locked by the developer at listing, held in the vault.
+    /// Returned at teardown.
+    pub deposit: u64,
+    pub status: ListingStatus,
     pub bump: u8,
 }
 

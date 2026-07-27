@@ -31,13 +31,18 @@ use solana_transaction::versioned::VersionedTransaction;
 
 use anchor_lang::{AnchorSerialize, Discriminator};
 use marketplace::instructions::ConfigParams;
-use marketplace::{CONFIG_SEED, LAWYER_SEED, VAULT_SEED};
+use marketplace::{CONFIG_SEED, LAWYER_SEED, LISTING_SEED, PROPERTY_SEED, VAULT_SEED};
 
 pub const SYS: Pubkey = anchor_lang::system_program::ID;
 pub const DECIMALS: u8 = 9;
 pub const FUND_XCAV: u64 = 100_000_000_000;
 pub const LISTING_DEPOSIT: u64 = 1_000_000_000;
 pub const LAWYER_DEPOSIT: u64 = 500_000_000;
+pub const SHARE_PRICE: u64 = 5_000_000_000;
+pub const SHARE_AMOUNT: u32 = 100;
+/// Matches the `listing_duration` that `seed_region` writes.
+pub const LISTING_DURATION: i64 = 100_000;
+pub const POSTCODE: &[u8] = b"SW1A1AA";
 
 // --- ids / PDAs ---
 
@@ -61,6 +66,20 @@ pub fn lawyer_pda(wallet: &Pubkey) -> Pubkey {
 pub fn region_pda(region_id: u16) -> Pubkey {
     Pubkey::find_program_address(
         &[regions::REGION_SEED, &region_id.to_le_bytes()],
+        &regions::id(),
+    )
+    .0
+}
+
+pub fn property_pda(asset_id: u64) -> Pubkey {
+    Pubkey::find_program_address(&[PROPERTY_SEED, &asset_id.to_le_bytes()], &mid()).0
+}
+pub fn listing_pda(listing_id: u64) -> Pubkey {
+    Pubkey::find_program_address(&[LISTING_SEED, &listing_id.to_le_bytes()], &mid()).0
+}
+pub fn location_pda(region_id: u16, postcode: &[u8]) -> Pubkey {
+    Pubkey::find_program_address(
+        &[regions::LOCATION_SEED, &region_id.to_le_bytes(), postcode],
         &regions::id(),
     )
     .0
@@ -400,6 +419,124 @@ pub fn seed_region(svm: &mut LiteSVM, region_id: u16, owner: &Pubkey) {
         },
     )
     .unwrap();
+}
+
+/// Write a registered `Location` account at its canonical PDA, exactly as the
+/// regions program would leave it. Listing only needs the account to exist.
+pub fn seed_location(svm: &mut LiteSVM, region_id: u16, postcode: &[u8]) {
+    let (address, bump) = Pubkey::find_program_address(
+        &[regions::LOCATION_SEED, &region_id.to_le_bytes(), postcode],
+        &regions::id(),
+    );
+    let location = regions::state::Location {
+        region_id,
+        postcode: postcode.to_vec(),
+        bump,
+    };
+    let mut data = regions::state::Location::DISCRIMINATOR.to_vec();
+    location.serialize(&mut data).unwrap();
+    svm.set_account(
+        address,
+        Account {
+            lamports: 100_000_000,
+            data,
+            owner: regions::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
+
+/// A SOL-funded, XCAV-holding keypair with the RealEstateDeveloper role.
+pub fn new_developer(svm: &mut LiteSVM, admin: &Keypair) -> Keypair {
+    let kp = actor(svm);
+    ok(
+        svm,
+        roles_assign_ix(&admin.pubkey(), &kp.pubkey(), Role::RealEstateDeveloper),
+        admin,
+        &[admin],
+    );
+    kp
+}
+
+pub fn list_property_ix(
+    developer: &Pubkey,
+    listing_id: u64,
+    region_id: u16,
+    postcode: &[u8],
+    share_price: u64,
+    share_amount: u32,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::ListProperty {
+            region_id,
+            postcode: postcode.to_vec(),
+            share_price,
+            share_amount,
+            tax_paid_by_developer: false,
+        }
+        .data(),
+        marketplace::accounts::ListProperty {
+            developer: *developer,
+            config: marketplace_config(),
+            developer_role: role_pda(developer, Role::RealEstateDeveloper),
+            region: region_pda(region_id),
+            location: location_pda(region_id, postcode),
+            property: property_pda(listing_id),
+            listing: listing_pda(listing_id),
+            xcav_mint: xcav_mint(),
+            developer_token: token_acc(developer),
+            vault: vault(),
+            token_program: TOKEN_PROGRAM_ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// List with the default region 1 / seeded postcode / default price and amount.
+pub fn list_ix(developer: &Pubkey, listing_id: u64) -> Instruction {
+    list_property_ix(
+        developer,
+        listing_id,
+        1,
+        POSTCODE,
+        SHARE_PRICE,
+        SHARE_AMOUNT,
+    )
+}
+
+pub fn upgrade_ix(developer: &Pubkey, listing_id: u64, new_price: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::UpgradeObject {
+            listing_id,
+            new_price,
+        }
+        .data(),
+        marketplace::accounts::UpgradeObject {
+            developer: *developer,
+            developer_role: role_pda(developer, Role::RealEstateDeveloper),
+            listing: listing_pda(listing_id),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn listing_of(svm: &LiteSVM, listing_id: u64) -> marketplace::state::Listing {
+    marketplace::state::Listing::try_deserialize(
+        &mut &svm.get_account(&listing_pda(listing_id)).unwrap().data[..],
+    )
+    .unwrap()
+}
+
+pub fn property_of(svm: &LiteSVM, asset_id: u64) -> marketplace::state::PropertyAsset {
+    marketplace::state::PropertyAsset::try_deserialize(
+        &mut &svm.get_account(&property_pda(asset_id)).unwrap().data[..],
+    )
+    .unwrap()
 }
 
 pub fn register_lawyer_ix(lawyer: &Pubkey, region_id: u16) -> Instruction {

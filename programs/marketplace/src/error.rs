@@ -23,4 +23,28 @@ pub enum MarketplaceError {
     /// The lawyer still has active cases and can't unregister.
     #[msg("Lawyer still has active cases")]
     LawyerStillActive,
+    /// The role exists but its compliance flag is not set.
+    #[msg("Role is not compliant")]
+    NotCompliant,
+    /// The share amount is zero or outside the configured bounds.
+    #[msg("Invalid share amount")]
+    InvalidShareAmount,
+    /// The share price is zero.
+    #[msg("Invalid share price")]
+    InvalidSharePrice,
+    /// The listing's expiry has passed.
+    #[msg("Listing has expired")]
+    ListingExpired,
+    /// The signer is not the listing's developer.
+    #[msg("Signer is not the listing developer")]
+    NotListingDeveloper,
+    /// Every share has been sold, or the legal phase has already started.
+    #[msg("Property is already sold")]
+    PropertyAlreadySold,
+    /// The listing is not open for this action.
+    #[msg("Listing is not active")]
+    ListingNotActive,
+    /// Arithmetic overflow.
+    #[msg("Arithmetic overflow")]
+    Overflow,
 }

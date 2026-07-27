@@ -47,4 +47,30 @@ pub mod marketplace {
     pub fn unregister_lawyer(ctx: Context<UnregisterLawyer>) -> Result<()> {
         lawyers::unregister_lawyer_handler(ctx)
     }
+
+    pub fn list_property(
+        ctx: Context<ListProperty>,
+        region_id: u16,
+        postcode: Vec<u8>,
+        share_price: u64,
+        share_amount: u32,
+        tax_paid_by_developer: bool,
+    ) -> Result<()> {
+        listing::list_property_handler(
+            ctx,
+            region_id,
+            postcode,
+            share_price,
+            share_amount,
+            tax_paid_by_developer,
+        )
+    }
+
+    pub fn upgrade_object(
+        ctx: Context<UpgradeObject>,
+        listing_id: u64,
+        new_price: u64,
+    ) -> Result<()> {
+        listing::upgrade_object_handler(ctx, listing_id, new_price)
+    }
 }
