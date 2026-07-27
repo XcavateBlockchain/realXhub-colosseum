@@ -92,4 +92,16 @@ pub mod marketplace {
     ) -> Result<()> {
         buy::buy_property_shares_handler(ctx, listing_id, amount, max_total_cost)
     }
+
+    pub fn unreserve_shares(ctx: Context<UnreserveShares>, listing_id: u64) -> Result<()> {
+        unreserve::unreserve_shares_handler(ctx, listing_id)
+    }
+
+    pub fn close_cancelled_position(
+        ctx: Context<CloseCancelledPosition>,
+        listing_id: u64,
+        investor: Pubkey,
+    ) -> Result<()> {
+        unreserve::close_cancelled_position_handler(ctx, listing_id, investor)
+    }
 }

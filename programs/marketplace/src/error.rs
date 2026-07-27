@@ -71,4 +71,13 @@ pub enum MarketplaceError {
     /// The rent payer is not the configured rent collector.
     #[msg("Payer is not the rent collector")]
     NotRentCollector,
+    /// The position holds no shares to return.
+    #[msg("Nothing to unreserve")]
+    NothingToUnreserve,
+    /// Only cancelled positions can be reclaimed by the crank.
+    #[msg("Position is not cancelled")]
+    PositionNotCancelled,
+    /// The listing is still selling, so the position must stay open.
+    #[msg("Listing is still active")]
+    ListingStillActive,
 }

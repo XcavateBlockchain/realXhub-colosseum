@@ -856,6 +856,71 @@ pub fn buy_ix_with_mint(
     )
 }
 
+pub fn unreserve_ix(investor: &Pubkey, listing_id: u64) -> Instruction {
+    unreserve_ix_with_mint(
+        investor,
+        listing_id,
+        tgbp_mint(),
+        tgbp_acc(investor),
+        listing_payment_ata(listing_id),
+        TOKEN_PROGRAM_ID,
+    )
+}
+
+pub fn unreserve_ix_with_mint(
+    investor: &Pubkey,
+    listing_id: u64,
+    payment_mint: Pubkey,
+    investor_payment: Pubkey,
+    listing_payment_account: Pubkey,
+    payment_token_program: Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::UnreserveShares { listing_id }.data(),
+        marketplace::accounts::UnreserveShares {
+            investor: *investor,
+            config: marketplace_config(),
+            rent_collector: sponsor().pubkey(),
+            listing: listing_pda(listing_id),
+            property: property_pda(listing_id),
+            position: position_pda(listing_id, investor),
+            holding: holding_pda(listing_id, investor),
+            payment_mint,
+            investor_payment,
+            listing_vault: listing_vault_pda(listing_id),
+            listing_payment_account,
+            share_mint: share_mint_pda(listing_id),
+            mint_auth: mint_auth_pda(listing_id),
+            property_vault: property_vault_pda(listing_id),
+            vault_share_account: vault_share_account(listing_id),
+            investor_share_account: investor_share_ata(listing_id, investor),
+            payment_token_program,
+            share_token_program: anchor_spl::token_2022::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn close_position_ix(cranker: &Pubkey, listing_id: u64, investor: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::CloseCancelledPosition {
+            listing_id,
+            investor: *investor,
+        }
+        .data(),
+        marketplace::accounts::CloseCancelledPosition {
+            cranker: *cranker,
+            config: marketplace_config(),
+            rent_collector: sponsor().pubkey(),
+            listing: listing_pda(listing_id),
+            position: position_pda(listing_id, investor),
+        }
+        .to_account_metas(None),
+    )
+}
+
 pub fn position_of(
     svm: &LiteSVM,
     listing_id: u64,
