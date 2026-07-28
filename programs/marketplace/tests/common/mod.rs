@@ -921,6 +921,118 @@ pub fn close_position_ix(cranker: &Pubkey, listing_id: u64, investor: &Pubkey) -
     )
 }
 
+/// A SOL-funded keypair with the SpvConfirmation role.
+pub fn new_confirmer(svm: &mut LiteSVM, admin: &Keypair) -> Keypair {
+    let kp = funded(svm);
+    ok(
+        svm,
+        roles_assign_ix(&admin.pubkey(), &kp.pubkey(), Role::SpvConfirmation),
+        admin,
+        &[admin],
+    );
+    kp
+}
+
+pub fn create_spv_ix(confirmer: &Pubkey, listing_id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::CreateSpv { listing_id }.data(),
+        marketplace::accounts::CreateSpv {
+            confirmer: *confirmer,
+            confirmer_role: role_pda(confirmer, Role::SpvConfirmation),
+            listing: listing_pda(listing_id),
+            property: property_pda(listing_id),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn withdraw_expired_ix(investor: &Pubkey, listing_id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::WithdrawExpired { listing_id }.data(),
+        marketplace::accounts::WithdrawExpired {
+            investor: *investor,
+            config: marketplace_config(),
+            rent_collector: sponsor().pubkey(),
+            listing: listing_pda(listing_id),
+            property: property_pda(listing_id),
+            position: position_pda(listing_id, investor),
+            holding: holding_pda(listing_id, investor),
+            payment_mint: tgbp_mint(),
+            investor_payment: tgbp_acc(investor),
+            listing_vault: listing_vault_pda(listing_id),
+            listing_payment_account: listing_payment_ata(listing_id),
+            share_mint: share_mint_pda(listing_id),
+            mint_auth: mint_auth_pda(listing_id),
+            property_vault: property_vault_pda(listing_id),
+            vault_share_account: vault_share_account(listing_id),
+            investor_share_account: investor_share_ata(listing_id, investor),
+            payment_token_program: TOKEN_PROGRAM_ID,
+            share_token_program: anchor_spl::token_2022::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn withdraw_legal_expired_ix(investor: &Pubkey, listing_id: u64) -> Instruction {
+    let mut ix = withdraw_expired_ix(investor, listing_id);
+    ix.data = marketplace::instruction::WithdrawLegalProcessExpired { listing_id }.data();
+    ix
+}
+
+pub fn close_dead_listing_ix(
+    cranker: &Pubkey,
+    listing_id: u64,
+    developer: &Pubkey,
+    with_mint: bool,
+    payment_atas: &[Pubkey],
+) -> Instruction {
+    let mut accounts = marketplace::accounts::CloseDeadListing {
+        cranker: *cranker,
+        config: marketplace_config(),
+        rent_collector: sponsor().pubkey(),
+        developer: *developer,
+        listing: listing_pda(listing_id),
+        property: property_pda(listing_id),
+        share_mint: with_mint.then(|| share_mint_pda(listing_id)),
+        mint_auth: mint_auth_pda(listing_id),
+        property_vault: property_vault_pda(listing_id),
+        vault_share_account: with_mint.then(|| vault_share_account(listing_id)),
+        listing_vault: listing_vault_pda(listing_id),
+        share_token_program: anchor_spl::token_2022::ID,
+        payment_token_program: TOKEN_PROGRAM_ID,
+    }
+    .to_account_metas(None);
+    for ata in payment_atas {
+        accounts.push(anchor_lang::solana_program::instruction::AccountMeta::new(
+            *ata, false,
+        ));
+    }
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::CloseDeadListing { listing_id }.data(),
+        accounts,
+    )
+}
+
+pub fn withdraw_deposit_ix(developer: &Pubkey, listing_id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::WithdrawDepositUnsold { listing_id }.data(),
+        marketplace::accounts::WithdrawDepositUnsold {
+            developer: *developer,
+            config: marketplace_config(),
+            listing: listing_pda(listing_id),
+            xcav_mint: xcav_mint(),
+            developer_token: token_acc(developer),
+            vault: vault(),
+            token_program: TOKEN_PROGRAM_ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
 pub fn position_of(
     svm: &LiteSVM,
     listing_id: u64,

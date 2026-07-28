@@ -80,4 +80,40 @@ pub enum MarketplaceError {
     /// The listing is still selling, so the position must stay open.
     #[msg("Listing is still active")]
     ListingStillActive,
+    /// No share has been sold yet.
+    #[msg("No shares sold")]
+    NoSharesSold,
+    /// The SPV was already confirmed for this property.
+    #[msg("SPV already created")]
+    SpvAlreadyCreated,
+    /// The listing has not reached its expiry.
+    #[msg("Listing is not expired")]
+    ListingNotExpired,
+    /// Shares are still held by investors.
+    #[msg("Shares are still outstanding")]
+    SharesOutstanding,
+    /// The listing deposit was already withdrawn.
+    #[msg("Deposit already withdrawn")]
+    DepositAlreadyWithdrawn,
+    /// The ownership cap would not admit a single purchase.
+    #[msg("Ownership cap admits no purchase")]
+    OwnershipCapTooTight,
+    /// The share ledger does not match the position.
+    #[msg("Share ledger does not match the position")]
+    LedgerMismatch,
+    /// Shares are locked by a vote.
+    #[msg("Shares are locked")]
+    SharesLocked,
+    /// The legal process still has time to run.
+    #[msg("Legal process has not expired")]
+    LegalProcessNotExpired,
+    /// The developer has not withdrawn the listing deposit yet.
+    #[msg("Deposit still held")]
+    DepositStillHeld,
+    /// Investor positions are still open, cancelled ones included.
+    #[msg("Positions still open")]
+    PositionsOutstanding,
+    /// The account is not the vault's associated account for this mint.
+    #[msg("Wrong vault account")]
+    WrongVaultAccount,
 }

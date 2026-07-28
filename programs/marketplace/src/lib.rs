@@ -104,4 +104,33 @@ pub mod marketplace {
     ) -> Result<()> {
         unreserve::close_cancelled_position_handler(ctx, listing_id, investor)
     }
+
+    pub fn create_spv(ctx: Context<CreateSpv>, listing_id: u64) -> Result<()> {
+        spv::create_spv_handler(ctx, listing_id)
+    }
+
+    pub fn withdraw_expired(ctx: Context<WithdrawExpired>, listing_id: u64) -> Result<()> {
+        withdraw::withdraw_expired_handler(ctx, listing_id)
+    }
+
+    pub fn withdraw_deposit_unsold(
+        ctx: Context<WithdrawDepositUnsold>,
+        listing_id: u64,
+    ) -> Result<()> {
+        withdraw::withdraw_deposit_unsold_handler(ctx, listing_id)
+    }
+
+    pub fn withdraw_legal_process_expired(
+        ctx: Context<WithdrawExpired>,
+        listing_id: u64,
+    ) -> Result<()> {
+        withdraw::withdraw_legal_process_expired_handler(ctx, listing_id)
+    }
+
+    pub fn close_dead_listing<'info>(
+        ctx: Context<'info, CloseDeadListing<'info>>,
+        listing_id: u64,
+    ) -> Result<()> {
+        teardown::close_dead_listing_handler(ctx, listing_id)
+    }
 }

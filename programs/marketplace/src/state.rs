@@ -127,11 +127,28 @@ pub struct Listing {
     pub marketplace_fee_bps: u16,
     /// Investor fee at listing time, in basis points.
     pub investor_fee_bps: u16,
-    /// Ownership cap at listing time, in basis points.
+    /// Ownership cap at listing time, in basis points. Holdings must stay
+    /// strictly below it, so even 10_000 requires at least two holders.
     pub max_ownership_bps: u16,
     pub listing_expiry: i64,
-    /// The XCAV locked by the developer at listing, held in the vault.
-    /// Returned at teardown.
+    /// Seconds the legal process may run once the listing sells out, taken
+    /// from config at listing time.
+    pub legal_process_time: i64,
+    /// Seconds the SPV-lawyer election stays open, taken from config at
+    /// listing time.
+    pub lawyer_voting_time: i64,
+    /// Quorum for the SPV-lawyer election, taken from config at listing time.
+    pub min_voting_quorum_bps: u16,
+    /// Open `InvestorPosition` accounts, cancelled ones included. Teardown
+    /// waits for zero, so a position can never outlive the listing it needs
+    /// to close against.
+    pub position_count: u32,
+    /// Set when the last share sells: the moment the legal process runs out
+    /// and the timeout exit opens. Zero until then.
+    pub legal_deadline: i64,
+    /// The XCAV locked by the developer at listing, held in the vault. Zero
+    /// doubles as "already withdrawn", which is unambiguous because config
+    /// validation never accepts a zero deposit.
     pub deposit: u64,
     pub status: ListingStatus,
     pub bump: u8,

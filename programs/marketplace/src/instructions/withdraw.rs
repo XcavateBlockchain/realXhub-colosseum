@@ -6,27 +6,27 @@ use anchor_spl::token_interface::{
 
 use crate::constants::{
     CONFIG_SEED, LISTING_SEED, LISTING_VAULT_SEED, MINT_AUTH_SEED, POSITION_SEED, PROPERTY_SEED,
-    PROPERTY_VAULT_SEED, SHARE_MINT_SEED, SHARE_SEED,
+    PROPERTY_VAULT_SEED, SHARE_MINT_SEED, SHARE_SEED, VAULT_SEED,
 };
 use crate::error::MarketplaceError;
 use crate::state::{Config, InvestorPosition, Listing, ListingStatus, PropertyAsset, ShareHolding};
+use crate::vault::release_from_vault;
 
-/// Return every share of a primary-sale position for a full refund, fee and
-/// tax included, any time before the listing sells out. One-way: the position
-/// stays open with `cancelled` set, and this investor can never buy into this
-/// listing again (the frontend warns before they confirm). Deliberately not
-/// role-gated: this is a pure exit, and an investor whose role or compliance
-/// was revoked must still be able to get their money back.
+/// Take everything back out of a listing that expired before selling out:
+/// the shares return to the property vault and the full payment, fee and tax
+/// included, comes back from the listing vault. The first withdrawal moves
+/// the listing to `Expired`. Both accounts close, since a dead listing can't
+/// be bought into again. Deliberately not role-gated: exits never are.
 #[derive(Accounts)]
 #[instruction(listing_id: u64)]
-pub struct UnreserveShares<'info> {
+pub struct WithdrawExpired<'info> {
     pub investor: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Box<Account<'info, Config>>,
 
-    /// CHECK: the sponsor wallet that fronted the holding's rent; gets it back
-    /// as the account closes.
+    /// CHECK: the sponsor wallet that fronted the accounts' rent; gets it
+    /// back as they close.
     #[account(mut, address = config.rent_collector @ MarketplaceError::NotRentCollector)]
     pub rent_collector: UncheckedAccount<'info>,
 
@@ -44,17 +44,14 @@ pub struct UnreserveShares<'info> {
     )]
     pub property: Box<Account<'info, PropertyAsset>>,
 
-    /// The position being unreserved. Zeroed and flagged, never closed here:
-    /// its continued existence is what bars re-buying.
     #[account(
         mut,
+        close = rent_collector,
         seeds = [POSITION_SEED, &listing_id.to_le_bytes(), investor.key().as_ref()],
         bump = position.bump,
     )]
     pub position: Box<Account<'info, InvestorPosition>>,
 
-    /// The holding closes with the shares gone; a later secondary-market buy
-    /// would recreate it.
     #[account(
         mut,
         close = rent_collector,
@@ -125,13 +122,75 @@ pub struct UnreserveShares<'info> {
     pub share_token_program: Program<'info, Token2022>,
 }
 
-pub fn unreserve_shares_handler(ctx: Context<UnreserveShares>, listing_id: u64) -> Result<()> {
-    // Only while the sale is still open; the last share locks it in and the
-    // legal process takes over.
-    require!(
-        ctx.accounts.listing.status == ListingStatus::Listed,
-        MarketplaceError::ListingNotActive
-    );
+pub fn withdraw_expired_handler(ctx: Context<WithdrawExpired>, listing_id: u64) -> Result<()> {
+    let now = Clock::get()?.unix_timestamp;
+    match ctx.accounts.listing.status {
+        // The first withdrawal proves the expiry and flips the status, which
+        // also opens the cancelled-position crank.
+        ListingStatus::Listed => {
+            require!(
+                now >= ctx.accounts.listing.listing_expiry,
+                MarketplaceError::ListingNotExpired
+            );
+            ctx.accounts.listing.status = ListingStatus::Expired;
+        }
+        ListingStatus::Expired => {}
+        _ => return err!(MarketplaceError::ListingNotActive),
+    }
+    let investor = ctx.accounts.investor.key();
+    let (amount, refund, payment_mint) = settle_dead_listing_exit(ctx, listing_id)?;
+
+    emit!(ExpiredSharesWithdrawn {
+        listing_id,
+        investor,
+        amount,
+        payment_mint,
+        refunded: refund,
+    });
+    Ok(())
+}
+
+/// The timeout exit for a sale that sold out but whose legal process never
+/// settled: once the deadline passes, investors take their money back the
+/// same way they would from an expired listing. The first withdrawal moves
+/// the listing to `Refunding`. This is what keeps a successful sale from
+/// ever being a trap.
+pub fn withdraw_legal_process_expired_handler(
+    ctx: Context<WithdrawExpired>,
+    listing_id: u64,
+) -> Result<()> {
+    let now = Clock::get()?.unix_timestamp;
+    match ctx.accounts.listing.status {
+        ListingStatus::SoldOut => {
+            require!(
+                now >= ctx.accounts.listing.legal_deadline,
+                MarketplaceError::LegalProcessNotExpired
+            );
+            ctx.accounts.listing.status = ListingStatus::Refunding;
+        }
+        ListingStatus::Refunding => {}
+        _ => return err!(MarketplaceError::ListingNotActive),
+    }
+    let investor = ctx.accounts.investor.key();
+    let (amount, refund, payment_mint) = settle_dead_listing_exit(ctx, listing_id)?;
+
+    emit!(LegalTimeoutSharesWithdrawn {
+        listing_id,
+        investor,
+        amount,
+        payment_mint,
+        refunded: refund,
+    });
+    Ok(())
+}
+
+/// The shared exit body: shares back to the property vault, the full payment
+/// back to the investor, both per-investor accounts closed, the counters
+/// unwound. Callers have already validated and transitioned the status.
+fn settle_dead_listing_exit(
+    ctx: Context<WithdrawExpired>,
+    listing_id: u64,
+) -> Result<(u32, u64, Pubkey)> {
     let amount = ctx.accounts.position.share_amount;
     require!(amount > 0, MarketplaceError::NothingToUnreserve);
     // The ledger must agree with the position before it closes on the
@@ -153,8 +212,7 @@ pub fn unreserve_shares_handler(ctx: Context<UnreserveShares>, listing_id: u64) 
         .and_then(|r| r.checked_add(ctx.accounts.position.paid_tax))
         .ok_or(MarketplaceError::Overflow)?;
 
-    // Shares back to the property vault: open the investor's account for the
-    // one transfer, then lock it again.
+    // Shares back to the property vault through the usual airlock.
     let id_bytes = listing_id.to_le_bytes();
     let auth_seeds: &[&[u8]] = &[MINT_AUTH_SEED, &id_bytes, &[ctx.bumps.mint_auth]];
     let vault_seeds: &[&[u8]] = &[LISTING_VAULT_SEED, &id_bytes, &[ctx.bumps.listing_vault]];
@@ -190,7 +248,6 @@ pub fn unreserve_shares_handler(ctx: Context<UnreserveShares>, listing_id: u64) 
         &[auth_seeds],
     ))?;
 
-    // The refund, in the mint the position paid with.
     transfer_checked(
         CpiContext::new_with_signer(
             ctx.accounts.payment_token_program.key(),
@@ -206,13 +263,6 @@ pub fn unreserve_shares_handler(ctx: Context<UnreserveShares>, listing_id: u64) 
         ctx.accounts.payment_mint.decimals,
     )?;
 
-    let position = &mut ctx.accounts.position;
-    position.share_amount = 0;
-    position.paid_funds = 0;
-    position.paid_fee = 0;
-    position.paid_tax = 0;
-    position.cancelled = true;
-
     ctx.accounts.property.holder_count = ctx
         .accounts
         .property
@@ -224,78 +274,113 @@ pub fn unreserve_shares_handler(ctx: Context<UnreserveShares>, listing_id: u64) 
         .sold_share_amount
         .checked_sub(amount)
         .ok_or(MarketplaceError::Overflow)?;
-
-    emit!(PropertySharesUnreserved {
-        listing_id,
-        investor: ctx.accounts.investor.key(),
-        amount,
-        payment_mint: ctx.accounts.position.payment_mint,
-        refunded: refund,
-    });
-    Ok(())
-}
-
-/// Reclaim the rent of a cancelled position once the listing has left
-/// `Listed`. Permissionless: cancelled investors have nothing locked and no
-/// reason to come back, so a crank sweeps the accounts and the sponsor gets
-/// its rent back. Never earlier, because the open position is what bars a
-/// cancelled investor from re-buying.
-#[derive(Accounts)]
-#[instruction(listing_id: u64, investor: Pubkey)]
-pub struct CloseCancelledPosition<'info> {
-    pub cranker: Signer<'info>,
-
-    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Box<Account<'info, Config>>,
-
-    /// CHECK: the sponsor wallet that fronted the position's rent.
-    #[account(mut, address = config.rent_collector @ MarketplaceError::NotRentCollector)]
-    pub rent_collector: UncheckedAccount<'info>,
-
-    #[account(
-        mut,
-        seeds = [LISTING_SEED, &listing_id.to_le_bytes()],
-        bump = listing.bump,
-    )]
-    pub listing: Box<Account<'info, Listing>>,
-
-    #[account(
-        mut,
-        close = rent_collector,
-        seeds = [POSITION_SEED, &listing_id.to_le_bytes(), investor.as_ref()],
-        bump = position.bump,
-        constraint = position.cancelled @ MarketplaceError::PositionNotCancelled,
-    )]
-    pub position: Box<Account<'info, InvestorPosition>>,
-}
-
-pub fn close_cancelled_position_handler(
-    ctx: Context<CloseCancelledPosition>,
-    listing_id: u64,
-    investor: Pubkey,
-) -> Result<()> {
-    // Past expiry the flag is moot even if nobody flipped the status: buy
-    // refuses expired listings on its own, so the windows still can't overlap.
-    require!(
-        ctx.accounts.listing.status != ListingStatus::Listed
-            || Clock::get()?.unix_timestamp >= ctx.accounts.listing.listing_expiry,
-        MarketplaceError::ListingStillActive
-    );
-    let listing = &mut ctx.accounts.listing;
+    // The position closes with this exit.
     listing.position_count = listing
         .position_count
         .checked_sub(1)
         .ok_or(MarketplaceError::Overflow)?;
 
-    emit!(CancelledPositionClosed {
+    Ok((amount, refund, ctx.accounts.position.payment_mint))
+}
+
+/// Give the developer their XCAV deposit back once the listing is dead with
+/// no shares in investor hands: abandoned before the assets ever existed, or
+/// expired with nothing sold (or everything withdrawn). Developer-only, and
+/// deliberately not role-gated: exits never are.
+#[derive(Accounts)]
+#[instruction(listing_id: u64)]
+pub struct WithdrawDepositUnsold<'info> {
+    pub developer: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+
+    #[account(
+        mut,
+        seeds = [LISTING_SEED, &listing_id.to_le_bytes()],
+        bump = listing.bump,
+        constraint = listing.developer == developer.key() @ MarketplaceError::NotListingDeveloper,
+    )]
+    pub listing: Box<Account<'info, Listing>>,
+
+    /// The XCAV mint (for `transfer_checked`).
+    #[account(address = config.xcav_mint @ MarketplaceError::InvalidMint)]
+    pub xcav_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    /// The developer's XCAV account the deposit is returned to.
+    #[account(
+        mut,
+        token::mint = config.xcav_mint,
+        token::authority = developer,
+    )]
+    pub developer_token: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// The protocol's XCAV vault.
+    #[account(
+        mut,
+        seeds = [VAULT_SEED],
+        bump,
+        token::mint = config.xcav_mint,
+        token::authority = config,
+    )]
+    pub vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    pub token_program: Interface<'info, TokenInterface>,
+}
+
+pub fn withdraw_deposit_unsold_handler(
+    ctx: Context<WithdrawDepositUnsold>,
+    listing_id: u64,
+) -> Result<()> {
+    let now = Clock::get()?.unix_timestamp;
+    match ctx.accounts.listing.status {
+        // Never opened for sale: the developer can abandon it right away.
+        ListingStatus::PendingAssets => {}
+        ListingStatus::Listed | ListingStatus::Expired => {
+            require!(
+                now >= ctx.accounts.listing.listing_expiry,
+                MarketplaceError::ListingNotExpired
+            );
+        }
+        // The legal timeout already proved its own deadline; once every
+        // investor has withdrawn, the deposit follows.
+        ListingStatus::Refunding => {}
+        _ => return err!(MarketplaceError::ListingNotActive),
+    }
+    require!(
+        ctx.accounts.listing.sold_share_amount == 0,
+        MarketplaceError::SharesOutstanding
+    );
+    let deposit = ctx.accounts.listing.deposit;
+    require!(deposit > 0, MarketplaceError::DepositAlreadyWithdrawn);
+
+    release_from_vault(
+        &ctx.accounts.token_program.to_account_info(),
+        &ctx.accounts.vault.to_account_info(),
+        &ctx.accounts.xcav_mint.to_account_info(),
+        &ctx.accounts.developer_token.to_account_info(),
+        &ctx.accounts.config.to_account_info(),
+        ctx.accounts.config.bump,
+        deposit,
+        ctx.accounts.xcav_mint.decimals,
+    )?;
+
+    let listing = &mut ctx.accounts.listing;
+    listing.deposit = 0;
+    if listing.status != ListingStatus::Refunding {
+        listing.status = ListingStatus::Expired;
+    }
+
+    emit!(ListingDepositWithdrawn {
         listing_id,
-        investor,
+        developer: ctx.accounts.developer.key(),
+        deposit,
     });
     Ok(())
 }
 
 #[event]
-pub struct PropertySharesUnreserved {
+pub struct ExpiredSharesWithdrawn {
     pub listing_id: u64,
     pub investor: Pubkey,
     pub amount: u32,
@@ -304,7 +389,17 @@ pub struct PropertySharesUnreserved {
 }
 
 #[event]
-pub struct CancelledPositionClosed {
+pub struct LegalTimeoutSharesWithdrawn {
     pub listing_id: u64,
     pub investor: Pubkey,
+    pub amount: u32,
+    pub payment_mint: Pubkey,
+    pub refunded: u64,
+}
+
+#[event]
+pub struct ListingDepositWithdrawn {
+    pub listing_id: u64,
+    pub developer: Pubkey,
+    pub deposit: u64,
 }

@@ -358,14 +358,25 @@ pub fn buy_property_shares_handler(
         .ok_or(MarketplaceError::Overflow)?;
 
     let listing = &mut ctx.accounts.listing;
+    if !position_exists {
+        listing.position_count = listing
+            .position_count
+            .checked_add(1)
+            .ok_or(MarketplaceError::Overflow)?;
+    }
     listing.sold_share_amount = listing
         .sold_share_amount
         .checked_add(amount)
         .ok_or(MarketplaceError::Overflow)?;
     // The last share locks the sale in; the legal process takes over from
-    // here and unreserving is no longer possible.
+    // here and unreserving is no longer possible. The timeout exit opens if
+    // the lawyers haven't settled by the deadline.
     if listing.sold_share_amount == listing.listed_share_amount {
         listing.status = ListingStatus::SoldOut;
+        listing.legal_deadline = Clock::get()?
+            .unix_timestamp
+            .checked_add(listing.legal_process_time)
+            .ok_or(MarketplaceError::Overflow)?;
     }
 
     emit!(PropertySharesBought {

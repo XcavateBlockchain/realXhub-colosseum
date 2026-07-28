@@ -12,7 +12,8 @@ use anchor_spl::token_2022::{
     ThawAccount, Token2022,
 };
 use anchor_spl::token_2022_extensions::{
-    default_account_state_initialize, permanent_delegate_initialize, DefaultAccountStateInitialize,
+    default_account_state_initialize, mint_close_authority_initialize,
+    permanent_delegate_initialize, DefaultAccountStateInitialize, MintCloseAuthorityInitialize,
     PermanentDelegateInitialize,
 };
 
@@ -120,6 +121,7 @@ pub fn init_property_assets_handler(
     let space = ExtensionType::try_calculate_account_len::<MintState>(&[
         ExtensionType::DefaultAccountState,
         ExtensionType::PermanentDelegate,
+        ExtensionType::MintCloseAuthority,
     ])?;
     let rent = Rent::get()?.minimum_balance(space);
     if ctx.accounts.share_mint.lamports() == 0 {
@@ -193,6 +195,18 @@ pub fn init_property_assets_handler(
             },
         ),
         ctx.accounts.mint_auth.key,
+    )?;
+    // The program can close the mint at teardown, so a dead property's rent
+    // isn't stranded forever.
+    mint_close_authority_initialize(
+        CpiContext::new(
+            ctx.accounts.token_program.key(),
+            MintCloseAuthorityInitialize {
+                token_program_id: ctx.accounts.token_program.to_account_info(),
+                mint: ctx.accounts.share_mint.to_account_info(),
+            },
+        ),
+        Some(ctx.accounts.mint_auth.key),
     )?;
     initialize_mint2(
         CpiContext::new(

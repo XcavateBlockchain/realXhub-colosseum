@@ -285,3 +285,25 @@ fn list_rejects_price_below_min_scale() {
         "InvalidSharePrice",
     );
 }
+
+// A listing whose ownership cap admits no purchase must never be created.
+#[test]
+fn list_rejects_unreachable_ownership_cap() {
+    let (mut svm, _admin, _authority, developer) = setup_listing();
+    // At the 50% cap, three shares floor to a max holding of one, and the
+    // strict bound turns that into zero allowed buys.
+    fails_with(
+        &mut svm,
+        list_property_ix(&developer.pubkey(), 0, 1, POSTCODE, SHARE_PRICE, 3),
+        &developer,
+        &[&developer],
+        "OwnershipCapTooTight",
+    );
+    // Four shares admit a one-share buy, so listing works.
+    ok(
+        &mut svm,
+        list_property_ix(&developer.pubkey(), 0, 1, POSTCODE, SHARE_PRICE, 4),
+        &developer,
+        &[&developer],
+    );
+}

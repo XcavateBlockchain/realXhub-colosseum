@@ -126,6 +126,16 @@ pub fn list_property_handler(
     share_price
         .checked_mul(share_amount as u64)
         .ok_or(MarketplaceError::Overflow)?;
+    // The strict-below ownership cap must admit at least a one-share buy, or
+    // the listing could never sell a single share.
+    require!(
+        (config.max_ownership_bps as u64)
+            .checked_mul(share_amount as u64)
+            .ok_or(MarketplaceError::Overflow)?
+            / 10_000
+            > 1,
+        MarketplaceError::OwnershipCapTooTight
+    );
 
     let listing_id = config.next_listing_id;
     let deposit = config.listing_deposit;
@@ -172,6 +182,11 @@ pub fn list_property_handler(
     listing.investor_fee_bps = config.investor_fee_bps;
     listing.max_ownership_bps = config.max_ownership_bps;
     listing.listing_expiry = listing_expiry;
+    listing.legal_process_time = config.legal_process_time;
+    listing.lawyer_voting_time = config.lawyer_voting_time;
+    listing.min_voting_quorum_bps = config.min_voting_quorum_bps;
+    listing.legal_deadline = 0;
+    listing.position_count = 0;
     listing.deposit = deposit;
     listing.status = ListingStatus::PendingAssets;
     listing.bump = ctx.bumps.listing;

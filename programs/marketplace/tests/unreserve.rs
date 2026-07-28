@@ -322,3 +322,32 @@ fn close_requires_cancelled_position() {
         "PositionNotCancelled",
     );
 }
+
+// The crank must not depend on anyone flipping the status: once the expiry
+// passes, cancelled positions are sweepable even if the listing never left
+// Listed.
+#[test]
+fn close_works_after_expiry_without_status_flip() {
+    let (mut svm, admin, sponsor) = setup_listed();
+    let investor = new_investor(&mut svm, &admin);
+    buy(&mut svm, &investor, &sponsor, 10);
+    ok(
+        &mut svm,
+        unreserve_ix(&investor.pubkey(), 0),
+        &investor,
+        &[&investor],
+    );
+
+    warp(&mut svm, LISTING_DURATION + 1);
+    assert_eq!(listing_of(&svm, 0).status, ListingStatus::Listed);
+    let cranker = funded(&mut svm);
+    ok(
+        &mut svm,
+        close_position_ix(&cranker.pubkey(), 0, &investor.pubkey()),
+        &cranker,
+        &[&cranker],
+    );
+    assert!(svm
+        .get_account(&position_pda(0, &investor.pubkey()))
+        .is_none_or(|a| a.data.is_empty()));
+}

@@ -33,6 +33,7 @@ solana-transaction = { workspace = true }
 solana-signer = { workspace = true }
 solana-keypair = { workspace = true }
 solana-account = { workspace = true }
+proptest = { workspace = true }
 
 
 [lints.rust]
