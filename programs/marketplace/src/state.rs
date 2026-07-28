@@ -74,7 +74,7 @@ pub enum ListingStatus {
     Finalized,
     /// Expired before selling out; refunds open.
     Expired,
-    /// Cancelled (e.g. the NoLawyer vote won); refunds open.
+    /// Cancelled by the legal process; refunds open.
     Cancelled,
     /// Being torn down; waiting for the last holder to withdraw.
     Refunding,
@@ -103,6 +103,52 @@ pub struct PropertyAsset {
     /// zero again.
     pub holder_count: u32,
     pub bump: u8,
+}
+
+/// Where a lawyer's document review stands.
+#[derive(
+    AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, PartialEq, Eq, Debug, Default,
+)]
+pub enum DocumentStatus {
+    #[default]
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// One side's engaged lawyer on a sold-out sale.
+#[derive(
+    AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, PartialEq, Eq, Debug, Default,
+)]
+pub struct LawyerAssignment {
+    /// The lawyer on this side; default until one is engaged.
+    pub lawyer: Pubkey,
+    /// What they charge, quoted at `PRICE_DECIMALS`, paid out of the
+    /// collected investor fees at settlement.
+    pub costs: u64,
+    pub doc_status: DocumentStatus,
+}
+
+/// Most lawyers that can stand in one SPV election round. Bounds the account
+/// list `finalize_spv_election` walks to find the plurality winner.
+pub const MAX_SPV_CANDIDATES: u32 = 5;
+
+/// The running SPV lawyer election. Any eligible lawyer may stand; the first
+/// candidacy opens the voting window and shareholders vote among the
+/// candidates. A round that elects nobody simply reopens: rounds repeat
+/// until a lawyer is engaged or the legal process expires into its timeout
+/// exit. One round at a time per listing.
+#[derive(
+    AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, PartialEq, Eq, Debug, Default,
+)]
+pub struct SpvElection {
+    /// When voting closes; zero while no round is running.
+    pub expiry: i64,
+    /// Candidates standing in the current round.
+    pub candidate_count: u32,
+    /// Round number, monotonic per listing. Candidacies and vote records are
+    /// keyed by it, so nothing stale can count toward a later round.
+    pub round: u64,
 }
 
 /// A primary property listing. Prices and windows are snapshotted here at
@@ -150,7 +196,56 @@ pub struct Listing {
     /// doubles as "already withdrawn", which is unambiguous because config
     /// validation never accepts a zero deposit.
     pub deposit: u64,
+    /// The developer's lawyer on the sale, allocated by the developer.
+    pub developer_lawyer: LawyerAssignment,
+    /// The SPV's lawyer on the sale, chosen by investor vote.
+    pub spv_lawyer: LawyerAssignment,
+    pub spv_election: SpvElection,
     pub status: ListingStatus,
+    pub bump: u8,
+}
+
+impl Listing {
+    /// The investor fees a full sale collects, quoted at `PRICE_DECIMALS`.
+    /// Lawyer costs are capped by this pot; the per-buy transfers floor when
+    /// rescaling to each mint, so settlement pays out with the same floor.
+    pub fn total_fee_quote(&self) -> Result<u64> {
+        let gross = self.share_price as u128 * self.listed_share_amount as u128;
+        u64::try_from(gross * self.investor_fee_bps as u128 / 10_000)
+            .map_err(|_| crate::error::MarketplaceError::Overflow.into())
+    }
+}
+
+/// One lawyer standing in one SPV election round; carries their own tally.
+/// The lawyer pays the rent and takes it back with `close_candidacy` once
+/// the round is over.
+#[account]
+#[derive(InitSpace)]
+pub struct LawyerCandidacy {
+    pub listing_id: u64,
+    /// The election round the candidacy belongs to.
+    pub round: u64,
+    pub lawyer: Pubkey,
+    /// What the candidate would charge, quoted at `PRICE_DECIMALS`.
+    pub costs: u64,
+    /// Share-weighted votes cast for this candidate.
+    pub vote_power: u32,
+    pub bump: u8,
+}
+
+/// One investor's vote in one SPV lawyer election round. Locks the voting
+/// shares until the record is closed again by `unlock_voting_shares`.
+#[account]
+#[derive(InitSpace)]
+pub struct LawyerVote {
+    pub listing_id: u64,
+    /// The election round the vote belongs to.
+    pub round: u64,
+    pub voter: Pubkey,
+    /// The candidate voted for.
+    pub choice: Pubkey,
+    /// The shares this vote locked and counts for.
+    pub power: u32,
     pub bump: u8,
 }
 

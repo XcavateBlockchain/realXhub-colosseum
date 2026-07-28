@@ -92,9 +92,23 @@ pub fn close_dead_listing_handler<'info>(
     require!(
         matches!(
             listing.status,
-            ListingStatus::Expired | ListingStatus::Refunding
+            ListingStatus::Expired | ListingStatus::Refunding | ListingStatus::Cancelled
         ),
         MarketplaceError::ListingNotActive
+    );
+    // An unsettled election still has candidacies keyed to this listing;
+    // the finalizer must sweep it first.
+    require!(
+        listing.spv_election.expiry == 0,
+        MarketplaceError::VotingStillOngoing
+    );
+    // Resigning needs the listing, and it is the only way a lawyer's case
+    // count ever falls. Closing under an engaged lawyer would pin their
+    // registry deposit forever.
+    require!(
+        listing.developer_lawyer.lawyer == Pubkey::default()
+            && listing.spv_lawyer.lawyer == Pubkey::default(),
+        MarketplaceError::LawyerStillEngaged
     );
     require!(listing.deposit == 0, MarketplaceError::DepositStillHeld);
     require!(

@@ -4,7 +4,8 @@ use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 use crate::constants::{CONFIG_SEED, LISTING_SEED, PROPERTY_SEED, VAULT_SEED};
 use crate::error::MarketplaceError;
 use crate::state::{
-    Config, Listing, ListingStatus, PropertyAsset, MIN_PAYMENT_DECIMALS, PRICE_DECIMALS,
+    Config, LawyerAssignment, Listing, ListingStatus, PropertyAsset, SpvElection,
+    MIN_PAYMENT_DECIMALS, PRICE_DECIMALS,
 };
 use crate::vault::lock_to_vault;
 
@@ -188,6 +189,9 @@ pub fn list_property_handler(
     listing.legal_deadline = 0;
     listing.position_count = 0;
     listing.deposit = deposit;
+    listing.developer_lawyer = LawyerAssignment::default();
+    listing.spv_lawyer = LawyerAssignment::default();
+    listing.spv_election = SpvElection::default();
     listing.status = ListingStatus::PendingAssets;
     listing.bump = ctx.bumps.listing;
 

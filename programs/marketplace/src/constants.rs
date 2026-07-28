@@ -32,3 +32,9 @@ pub const POSITION_SEED: &[u8] = b"position";
 
 #[constant]
 pub const LISTING_VAULT_SEED: &[u8] = b"listing-vault";
+
+#[constant]
+pub const LAWYER_VOTE_SEED: &[u8] = b"lawyer-vote";
+
+#[constant]
+pub const LAWYER_CANDIDATE_SEED: &[u8] = b"lawyer-candidate";

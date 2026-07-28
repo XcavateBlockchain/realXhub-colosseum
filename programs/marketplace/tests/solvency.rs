@@ -1,9 +1,11 @@
 //! Property-based solvency: random walks over the whole primary lifecycle
-//! (buy, unreserve, expiry, both withdraws, the cranks, teardown) must keep
-//! the listing vault equal to what open positions are owed, the share supply
-//! conserved between the property vault and the holders, and every counter in
-//! agreement with the accounts. Cross-checking the accounts against each
-//! other needs no model, so any drift in any writer shows up here.
+//! (buy, unreserve, expiry, both withdraws, the cranks, teardown, and the
+//! SPV lawyer election) must keep the listing vault equal to what open
+//! positions are owed, the share supply conserved between the property vault
+//! and the holders, every counter in agreement with the accounts, and every
+//! locked share backed by exactly one live vote record. Cross-checking the
+//! accounts against each other needs no model, so any drift in any writer
+//! shows up here.
 
 mod common;
 use common::*;
@@ -12,6 +14,9 @@ use anchor_spl::token_2022::spl_token_2022::{
     extension::StateWithExtensions, state::Account as TokenAccountState,
 };
 use proptest::prelude::*;
+
+/// Upper bound on election rounds in a walk: one per op at most.
+const MAX_ROUNDS: u64 = 16;
 
 fn token_balance(svm: &LiteSVM, addr: &Pubkey) -> u64 {
     svm.get_account(addr)
@@ -29,12 +34,41 @@ fn account_alive(svm: &LiteSVM, addr: &Pubkey) -> bool {
     svm.get_account(addr).is_some_and(|a| !a.data.is_empty())
 }
 
-fn check_invariants(svm: &LiteSVM, investors: &[Keypair]) -> Result<(), TestCaseError> {
+fn vote_record(
+    svm: &LiteSVM,
+    round: u64,
+    voter: &Pubkey,
+) -> Option<marketplace::state::LawyerVote> {
+    let addr = lawyer_vote_pda(0, round, voter);
+    svm.get_account(&addr)
+        .filter(|a| !a.data.is_empty())
+        .map(|a| marketplace::state::LawyerVote::try_deserialize(&mut &a.data[..]).unwrap())
+}
+
+fn candidacy(
+    svm: &LiteSVM,
+    round: u64,
+    lawyer: &Pubkey,
+) -> Option<marketplace::state::LawyerCandidacy> {
+    let addr = candidacy_pda(0, round, lawyer);
+    svm.get_account(&addr)
+        .filter(|a| !a.data.is_empty())
+        .map(|a| marketplace::state::LawyerCandidacy::try_deserialize(&mut &a.data[..]).unwrap())
+}
+
+fn check_invariants(
+    svm: &LiteSVM,
+    investors: &[Keypair],
+    lawyer: &Pubkey,
+) -> Result<(), TestCaseError> {
     if !account_alive(svm, &listing_pda(0)) {
         // Teardown ran; its guards promise nothing outlived the listing.
         for investor in investors {
             prop_assert!(!account_alive(svm, &position_pda(0, &investor.pubkey())));
             prop_assert!(!account_alive(svm, &holding_pda(0, &investor.pubkey())));
+            for round in 1..=MAX_ROUNDS {
+                prop_assert!(vote_record(svm, round, &investor.pubkey()).is_none());
+            }
         }
         prop_assert!(!account_alive(svm, &property_pda(0)));
         prop_assert_eq!(token_balance(svm, &listing_payment_ata(0)), 0);
@@ -72,14 +106,44 @@ fn check_invariants(svm: &LiteSVM, investors: &[Keypair]) -> Result<(), TestCase
     prop_assert_eq!(listing.sold_share_amount, position_shares);
     prop_assert_eq!(listing.position_count, open_positions);
     prop_assert_eq!(property_of(svm, 0).holder_count, holders);
+
+    // Votes: every locked share is backed by exactly one live record, and
+    // while a round runs, its tally equals the records behind it.
+    let election = listing.spv_election;
+    let mut current_round_power = 0u32;
+    for investor in investors {
+        let mut record_power = 0u32;
+        for round in 1..=MAX_ROUNDS {
+            if let Some(record) = vote_record(svm, round, &investor.pubkey()) {
+                record_power += record.power;
+                if round == election.round && election.expiry != 0 {
+                    current_round_power += record.power;
+                }
+            }
+        }
+        if account_alive(svm, &holding_pda(0, &investor.pubkey())) {
+            prop_assert_eq!(
+                holding_of(svm, 0, &investor.pubkey()).locked_amount,
+                record_power
+            );
+        } else {
+            prop_assert_eq!(record_power, 0);
+        }
+    }
+    if election.expiry != 0 {
+        let tally = candidacy(svm, election.round, lawyer)
+            .map(|c| c.vote_power)
+            .unwrap_or(0);
+        prop_assert_eq!(tally, current_round_power);
+    }
     Ok(())
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(8))]
+    #![proptest_config(ProptestConfig::with_cases(16))]
     #[test]
     fn random_lifecycle_walks_stay_solvent(
-        ops in proptest::collection::vec((0u8..3u8, 0u8..7u8, 1u32..30u32), 1..14)
+        ops in proptest::collection::vec((0u8..3u8, 0u8..12u8, 1u32..30u32), 1..14)
     ) {
         let (mut svm, admin, _authority) = setup();
         let operator = funded(&mut svm);
@@ -94,11 +158,18 @@ proptest! {
             new_investor(&mut svm, &admin),
             new_investor(&mut svm, &admin),
         ];
+        let lawyer = new_registered_lawyer(&mut svm, &admin, 1);
+        let confirmer = new_confirmer(&mut svm, &admin);
 
         for (who, kind, amount) in ops {
             let investor = &investors[who as usize];
-            // Failures (cap, cancelled, expired, wrong state) are part of the
-            // exercise; the invariants must hold either way.
+            // The election ops read the listing to aim their round argument,
+            // which a torn-down walk no longer has.
+            if (7..=10).contains(&kind) && !account_alive(&svm, &listing_pda(0)) {
+                continue;
+            }
+            // Failures (cap, cancelled, expired, wrong state, wrong round)
+            // are part of the exercise; the invariants must hold either way.
             match kind {
                 0 => {
                     let ix = buy_ix(&investor.pubkey(), &sponsor.pubkey(), 0, amount, u64::MAX);
@@ -121,6 +192,55 @@ proptest! {
                     let ix = withdraw_deposit_ix(&developer.pubkey(), 0);
                     let _ = process(&mut svm, ix, &developer, &[&developer]);
                 }
+                6 => {
+                    let ix = create_spv_ix(&confirmer.pubkey(), 0);
+                    let _ = process(&mut svm, ix, &confirmer, &[&confirmer]);
+                }
+                7 => {
+                    let election = listing_of(&svm, 0).spv_election;
+                    let round = if election.expiry == 0 {
+                        election.round + 1
+                    } else {
+                        election.round
+                    };
+                    let ix = claim_spv_ix(&lawyer.pubkey(), 0, round, 1_000_000_000);
+                    let _ = process(&mut svm, ix, &lawyer, &[&lawyer]);
+                }
+                8 => {
+                    // One lawyer stands in these walks, so every vote and
+                    // revote targets the same candidacy and never needs the
+                    // previous one.
+                    let round = listing_of(&svm, 0).spv_election.round;
+                    let ix = vote_spv_ix(
+                        &investor.pubkey(),
+                        0,
+                        round,
+                        &lawyer.pubkey(),
+                        None,
+                        amount,
+                    );
+                    let _ = process(&mut svm, ix, &sponsor, &[&sponsor, investor]);
+                }
+                9 => {
+                    let round = listing_of(&svm, 0).spv_election.round;
+                    let mut candidates = Vec::new();
+                    if candidacy(&svm, round, &lawyer.pubkey()).is_some() {
+                        candidates.push(lawyer.pubkey());
+                    }
+                    let ix = finalize_spv_ix(
+                        &investor.pubkey(),
+                        0,
+                        round,
+                        Some(&lawyer.pubkey()),
+                        &candidates,
+                    );
+                    let _ = process(&mut svm, ix, investor, &[investor]);
+                }
+                10 => {
+                    let round = listing_of(&svm, 0).spv_election.round;
+                    let ix = unlock_votes_ix(&investor.pubkey(), 0, round);
+                    let _ = process(&mut svm, ix, investor, &[investor]);
+                }
                 _ => {
                     let ix = close_dead_listing_ix(
                         &investor.pubkey(),
@@ -132,7 +252,7 @@ proptest! {
                     let _ = process(&mut svm, ix, investor, &[investor]);
                 }
             }
-            check_invariants(&svm, &investors)?;
+            check_invariants(&svm, &investors, &lawyer.pubkey())?;
         }
     }
 }

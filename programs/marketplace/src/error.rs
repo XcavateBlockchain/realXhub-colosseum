@@ -116,4 +116,58 @@ pub enum MarketplaceError {
     /// The account is not the vault's associated account for this mint.
     #[msg("Wrong vault account")]
     WrongVaultAccount,
+    /// The legal process deadline has passed.
+    #[msg("Legal process has expired")]
+    LegalProcessExpired,
+    /// This side of the case already has a lawyer.
+    #[msg("Case already has a lawyer for this side")]
+    LawyerJobTaken,
+    /// The same lawyer cannot act for both sides of a sale.
+    #[msg("Lawyer cannot represent both sides")]
+    ConflictOfInterest,
+    /// The combined lawyer costs would exceed the collected fees.
+    #[msg("Lawyer costs exceed the collected fees")]
+    CostsExceedFees,
+    /// The lawyer serves a different region than the property.
+    #[msg("Lawyer is registered for a different region")]
+    WrongRegion,
+    /// No election is open to act on.
+    #[msg("No lawyer proposed")]
+    NoLawyerProposed,
+    /// The SPV must exist before its lawyer can be elected.
+    #[msg("SPV has not been created")]
+    SpvNotCreated,
+    /// The vote amount is zero.
+    #[msg("Invalid vote amount")]
+    InvalidVoteAmount,
+    /// The voter holds fewer unlocked shares than the vote needs.
+    #[msg("Not enough unlocked shares")]
+    NotEnoughShares,
+    /// The election is still open.
+    #[msg("Voting is still ongoing")]
+    VotingStillOngoing,
+    /// The election has closed.
+    #[msg("Voting has closed")]
+    VotingClosed,
+    /// The signer is not a lawyer on this case.
+    #[msg("Signer is not a lawyer on this case")]
+    NotCaseLawyer,
+    /// The documents were already confirmed, so the lawyer is committed.
+    #[msg("Documents already confirmed")]
+    AlreadyConfirmed,
+    /// The round does not match the election's current state.
+    #[msg("Wrong election round")]
+    WrongElectionRound,
+    /// The election already has the most candidates it can carry.
+    #[msg("Too many candidates")]
+    TooManyCandidates,
+    /// A candidacy account does not belong to this election round.
+    #[msg("Candidacy does not match the election")]
+    CandidacyMismatch,
+    /// The account does not belong to the lawyer it should.
+    #[msg("Wrong lawyer account")]
+    WrongLawyer,
+    /// A lawyer is still engaged on the case and must resign first.
+    #[msg("Lawyer still engaged on the case")]
+    LawyerStillEngaged,
 }

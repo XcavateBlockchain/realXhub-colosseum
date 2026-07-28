@@ -342,9 +342,10 @@ pub fn withdraw_deposit_unsold_handler(
                 MarketplaceError::ListingNotExpired
             );
         }
-        // The legal timeout already proved its own deadline; once every
-        // investor has withdrawn, the deposit follows.
-        ListingStatus::Refunding => {}
+        // These already proved their own conditions (Cancelled arrives with
+        // the documents-rejection flow); once every investor has withdrawn,
+        // the deposit follows.
+        ListingStatus::Refunding | ListingStatus::Cancelled => {}
         _ => return err!(MarketplaceError::ListingNotActive),
     }
     require!(
@@ -367,7 +368,10 @@ pub fn withdraw_deposit_unsold_handler(
 
     let listing = &mut ctx.accounts.listing;
     listing.deposit = 0;
-    if listing.status != ListingStatus::Refunding {
+    if !matches!(
+        listing.status,
+        ListingStatus::Refunding | ListingStatus::Cancelled
+    ) {
         listing.status = ListingStatus::Expired;
     }
 

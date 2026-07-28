@@ -133,4 +133,58 @@ pub mod marketplace {
     ) -> Result<()> {
         teardown::close_dead_listing_handler(ctx, listing_id)
     }
+
+    pub fn assign_developer_lawyer(
+        ctx: Context<AssignDeveloperLawyer>,
+        listing_id: u64,
+        lawyer: Pubkey,
+        costs: u64,
+    ) -> Result<()> {
+        legal::assign_developer_lawyer_handler(ctx, listing_id, lawyer, costs)
+    }
+
+    pub fn claim_spv_case(
+        ctx: Context<ClaimSpvCase>,
+        listing_id: u64,
+        round: u64,
+        costs: u64,
+    ) -> Result<()> {
+        legal::claim_spv_case_handler(ctx, listing_id, round, costs)
+    }
+
+    pub fn vote_on_spv_lawyer(
+        ctx: Context<VoteOnSpvLawyer>,
+        listing_id: u64,
+        amount: u32,
+    ) -> Result<()> {
+        election::vote_on_spv_lawyer_handler(ctx, listing_id, amount)
+    }
+
+    pub fn close_candidacy(
+        ctx: Context<CloseCandidacy>,
+        listing_id: u64,
+        round: u64,
+        lawyer: Pubkey,
+    ) -> Result<()> {
+        election::close_candidacy_handler(ctx, listing_id, round, lawyer)
+    }
+
+    pub fn finalize_spv_election<'info>(
+        ctx: Context<'info, FinalizeSpvElection<'info>>,
+        listing_id: u64,
+    ) -> Result<()> {
+        election::finalize_spv_election_handler(ctx, listing_id)
+    }
+
+    pub fn unlock_voting_shares(
+        ctx: Context<UnlockVotingShares>,
+        listing_id: u64,
+        round: u64,
+    ) -> Result<()> {
+        election::unlock_voting_shares_handler(ctx, listing_id, round)
+    }
+
+    pub fn resign_from_case(ctx: Context<ResignFromCase>, listing_id: u64) -> Result<()> {
+        legal::resign_from_case_handler(ctx, listing_id)
+    }
 }

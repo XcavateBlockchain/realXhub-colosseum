@@ -1,7 +1,9 @@
 pub mod assets;
 pub mod buy;
+pub mod election;
 pub mod initialize;
 pub mod lawyers;
+pub mod legal;
 pub mod listing;
 pub mod spv;
 pub mod teardown;
@@ -10,8 +12,10 @@ pub mod withdraw;
 
 pub use assets::*;
 pub use buy::*;
+pub use election::*;
 pub use initialize::*;
 pub use lawyers::*;
+pub use legal::*;
 pub use listing::*;
 pub use spv::*;
 pub use teardown::*;

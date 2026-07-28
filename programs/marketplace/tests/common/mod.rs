@@ -1168,6 +1168,217 @@ pub fn new_lawyer(svm: &mut LiteSVM, admin: &Keypair) -> Keypair {
     kp
 }
 
+pub fn lawyer_vote_pda(listing_id: u64, round: u64, voter: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            marketplace::LAWYER_VOTE_SEED,
+            &listing_id.to_le_bytes(),
+            &round.to_le_bytes(),
+            voter.as_ref(),
+        ],
+        &mid(),
+    )
+    .0
+}
+
+pub fn candidacy_pda(listing_id: u64, round: u64, lawyer: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            marketplace::LAWYER_CANDIDATE_SEED,
+            &listing_id.to_le_bytes(),
+            &round.to_le_bytes(),
+            lawyer.as_ref(),
+        ],
+        &mid(),
+    )
+    .0
+}
+
+pub fn candidacy_of(
+    svm: &LiteSVM,
+    listing_id: u64,
+    round: u64,
+    lawyer: &Pubkey,
+) -> marketplace::state::LawyerCandidacy {
+    marketplace::state::LawyerCandidacy::try_deserialize(
+        &mut &svm
+            .get_account(&candidacy_pda(listing_id, round, lawyer))
+            .unwrap()
+            .data[..],
+    )
+    .unwrap()
+}
+
+/// A registered lawyer in the given region: role, XCAV for the deposit, and a
+/// registry entry.
+pub fn new_registered_lawyer(svm: &mut LiteSVM, admin: &Keypair, region_id: u16) -> Keypair {
+    let kp = new_lawyer(svm, admin);
+    ok(
+        svm,
+        register_lawyer_ix(&kp.pubkey(), region_id),
+        &kp,
+        &[&kp],
+    );
+    kp
+}
+
+pub fn assign_dev_lawyer_ix(
+    developer: &Pubkey,
+    listing_id: u64,
+    lawyer: &Pubkey,
+    costs: u64,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::AssignDeveloperLawyer {
+            listing_id,
+            lawyer: *lawyer,
+            costs,
+        }
+        .data(),
+        marketplace::accounts::AssignDeveloperLawyer {
+            developer: *developer,
+            developer_role: role_pda(developer, Role::RealEstateDeveloper),
+            lawyer_role: role_pda(lawyer, Role::Lawyer),
+            registry: lawyer_pda(lawyer),
+            listing: listing_pda(listing_id),
+            property: property_pda(listing_id),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn claim_spv_ix(lawyer: &Pubkey, listing_id: u64, round: u64, costs: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::ClaimSpvCase {
+            listing_id,
+            round,
+            costs,
+        }
+        .data(),
+        marketplace::accounts::ClaimSpvCase {
+            lawyer: *lawyer,
+            lawyer_role: role_pda(lawyer, Role::Lawyer),
+            registry: lawyer_pda(lawyer),
+            listing: listing_pda(listing_id),
+            property: property_pda(listing_id),
+            candidacy: candidacy_pda(listing_id, round, lawyer),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// Vote for a candidate; `previous` names the candidate a revote moves power
+/// away from.
+pub fn vote_spv_ix(
+    voter: &Pubkey,
+    listing_id: u64,
+    round: u64,
+    choice: &Pubkey,
+    previous: Option<&Pubkey>,
+    amount: u32,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::VoteOnSpvLawyer { listing_id, amount }.data(),
+        marketplace::accounts::VoteOnSpvLawyer {
+            voter: *voter,
+            payer: sponsor().pubkey(),
+            config: marketplace_config(),
+            voter_role: role_pda(voter, Role::RealEstateInvestor),
+            listing: listing_pda(listing_id),
+            holding: holding_pda(listing_id, voter),
+            vote_record: lawyer_vote_pda(listing_id, round, voter),
+            candidacy: candidacy_pda(listing_id, round, choice),
+            previous_candidacy: previous.map(|lawyer| candidacy_pda(listing_id, round, lawyer)),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn finalize_spv_ix(
+    cranker: &Pubkey,
+    listing_id: u64,
+    round: u64,
+    winner: Option<&Pubkey>,
+    candidates: &[Pubkey],
+) -> Instruction {
+    let mut accounts = marketplace::accounts::FinalizeSpvElection {
+        cranker: *cranker,
+        listing: listing_pda(listing_id),
+        property: property_pda(listing_id),
+        winner_registry: winner.map(lawyer_pda),
+    }
+    .to_account_metas(None);
+    for lawyer in candidates {
+        accounts.push(anchor_lang::solana_program::instruction::AccountMeta::new(
+            candidacy_pda(listing_id, round, lawyer),
+            false,
+        ));
+    }
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::FinalizeSpvElection { listing_id }.data(),
+        accounts,
+    )
+}
+
+pub fn close_candidacy_ix(
+    cranker: &Pubkey,
+    listing_id: u64,
+    round: u64,
+    lawyer: &Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::CloseCandidacy {
+            listing_id,
+            round,
+            lawyer: *lawyer,
+        }
+        .data(),
+        marketplace::accounts::CloseCandidacy {
+            cranker: *cranker,
+            listing: listing_pda(listing_id),
+            lawyer_wallet: *lawyer,
+            candidacy: candidacy_pda(listing_id, round, lawyer),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn unlock_votes_ix(voter: &Pubkey, listing_id: u64, round: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::UnlockVotingShares { listing_id, round }.data(),
+        marketplace::accounts::UnlockVotingShares {
+            voter: *voter,
+            config: marketplace_config(),
+            rent_collector: sponsor().pubkey(),
+            listing: listing_pda(listing_id),
+            holding: holding_pda(listing_id, voter),
+            vote_record: lawyer_vote_pda(listing_id, round, voter),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn resign_case_ix(lawyer: &Pubkey, listing_id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::ResignFromCase { listing_id }.data(),
+        marketplace::accounts::ResignFromCase {
+            lawyer: *lawyer,
+            registry: lawyer_pda(lawyer),
+            listing: listing_pda(listing_id),
+        }
+        .to_account_metas(None),
+    )
+}
+
 /// Flips a role assignment's compliance flag through the whitelist program.
 pub fn set_permission(
     svm: &mut LiteSVM,
