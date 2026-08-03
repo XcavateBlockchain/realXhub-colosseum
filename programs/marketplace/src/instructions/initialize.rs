@@ -20,6 +20,7 @@ pub struct ConfigParams {
     pub marketplace_fee_bps: u16,
     pub investor_fee_bps: u16,
     pub max_ownership_bps: u16,
+    pub claiming_time: i64,
     pub legal_process_time: i64,
     pub lawyer_voting_time: i64,
     pub min_voting_quorum_bps: u16,
@@ -66,7 +67,7 @@ impl ConfigParams {
             MarketplaceError::InvalidConfig
         );
         require!(
-            self.legal_process_time > 0 && self.lawyer_voting_time > 0,
+            self.claiming_time > 0 && self.legal_process_time > 0 && self.lawyer_voting_time > 0,
             MarketplaceError::InvalidConfig
         );
         require!(
@@ -87,6 +88,7 @@ impl ConfigParams {
         config.marketplace_fee_bps = self.marketplace_fee_bps;
         config.investor_fee_bps = self.investor_fee_bps;
         config.max_ownership_bps = self.max_ownership_bps;
+        config.claiming_time = self.claiming_time;
         config.legal_process_time = self.legal_process_time;
         config.lawyer_voting_time = self.lawyer_voting_time;
         config.min_voting_quorum_bps = self.min_voting_quorum_bps;

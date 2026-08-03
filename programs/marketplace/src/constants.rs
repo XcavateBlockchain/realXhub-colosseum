@@ -38,3 +38,6 @@ pub const LAWYER_VOTE_SEED: &[u8] = b"lawyer-vote";
 
 #[constant]
 pub const LAWYER_CANDIDATE_SEED: &[u8] = b"lawyer-candidate";
+
+#[constant]
+pub const RESERVATION_SEED: &[u8] = b"reservation";

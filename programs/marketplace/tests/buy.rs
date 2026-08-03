@@ -1,5 +1,6 @@
-//! Buying shares: funds held in the listing vault with their fee/tax split, direct share
-//! delivery into locked accounts, the ownership cap, and the sellout flip.
+//! Direct purchases, the post-claim-window market: funds held in the listing
+//! vault with their fee/tax split, direct share delivery into locked
+//! accounts, the ownership cap, and the sellout flip.
 
 mod common;
 use common::*;
@@ -46,6 +47,15 @@ fn setup_listed() -> (LiteSVM, Keypair, Keypair) {
     (svm, admin, sponsor())
 }
 
+/// `setup_listed` moved past the claim window, where direct purchases run:
+/// filler investors reserve every share so the SPV can attest, the window
+/// runs out unclaimed, and the crank releases them all.
+fn setup_direct() -> (LiteSVM, Keypair, Keypair) {
+    let (mut svm, admin, sponsor) = setup_listed();
+    acquire_many(&mut svm, &admin, &[]);
+    (svm, admin, sponsor)
+}
+
 fn buy(svm: &mut LiteSVM, investor: &Keypair, sponsor: &Keypair, amount: u32) {
     ok(
         svm,
@@ -57,7 +67,7 @@ fn buy(svm: &mut LiteSVM, investor: &Keypair, sponsor: &Keypair, amount: u32) {
 
 #[test]
 fn buy_delivers_shares_and_holds_funds() {
-    let (mut svm, admin, sponsor) = setup_listed();
+    let (mut svm, admin, sponsor) = setup_direct();
     let investor = new_investor(&mut svm, &admin);
 
     let tgbp_before = tgbp_balance(&svm, &investor.pubkey());
@@ -97,7 +107,7 @@ fn buy_delivers_shares_and_holds_funds() {
 
 #[test]
 fn second_buy_accumulates() {
-    let (mut svm, admin, sponsor) = setup_listed();
+    let (mut svm, admin, sponsor) = setup_direct();
     let investor = new_investor(&mut svm, &admin);
 
     buy(&mut svm, &investor, &sponsor, 10);
@@ -112,7 +122,7 @@ fn second_buy_accumulates() {
 
 #[test]
 fn buy_requires_compliant_investor() {
-    let (mut svm, admin, sponsor) = setup_listed();
+    let (mut svm, admin, sponsor) = setup_direct();
     let investor = new_investor(&mut svm, &admin);
     set_permission(
         &mut svm,
@@ -133,7 +143,7 @@ fn buy_requires_compliant_investor() {
 
 #[test]
 fn buy_rejects_unaccepted_mint() {
-    let (mut svm, admin, sponsor) = setup_listed();
+    let (mut svm, admin, sponsor) = setup_direct();
     let investor = new_investor(&mut svm, &admin);
     give_xcav(&mut svm, &investor.pubkey(), FUND_XCAV);
 
@@ -167,7 +177,7 @@ fn buy_rejects_unaccepted_mint() {
 
 #[test]
 fn buy_rejects_more_than_remaining() {
-    let (mut svm, admin, sponsor) = setup_listed();
+    let (mut svm, admin, sponsor) = setup_direct();
     let investor = new_investor(&mut svm, &admin);
     fails_with(
         &mut svm,
@@ -182,7 +192,7 @@ fn buy_rejects_more_than_remaining() {
 // of 100 shares is the most one investor can reach.
 #[test]
 fn buy_enforces_ownership_cap() {
-    let (mut svm, admin, sponsor) = setup_listed();
+    let (mut svm, admin, sponsor) = setup_direct();
     let investor = new_investor(&mut svm, &admin);
 
     fails_with(
@@ -208,7 +218,7 @@ fn buy_enforces_ownership_cap() {
 
 #[test]
 fn buy_rejects_cost_above_cap() {
-    let (mut svm, admin, sponsor) = setup_listed();
+    let (mut svm, admin, sponsor) = setup_direct();
     let investor = new_investor(&mut svm, &admin);
     fails_with(
         &mut svm,
@@ -227,7 +237,7 @@ fn buy_rejects_cost_above_cap() {
 
 #[test]
 fn last_share_flips_to_sold_out() {
-    let (mut svm, admin, sponsor) = setup_listed();
+    let (mut svm, admin, sponsor) = setup_direct();
     let alice = new_investor(&mut svm, &admin);
     let bob = new_investor(&mut svm, &admin);
     let carol = new_investor(&mut svm, &admin);
@@ -279,7 +289,7 @@ fn buy_requires_listed_status() {
 
 #[test]
 fn buy_after_expiry_fails() {
-    let (mut svm, admin, sponsor) = setup_listed();
+    let (mut svm, admin, sponsor) = setup_direct();
     let investor = new_investor(&mut svm, &admin);
     warp(&mut svm, LISTING_DURATION + 1);
     fails_with(
@@ -311,7 +321,7 @@ fn buy_rejects_foreign_sponsor() {
 // component divides by 1_000.
 #[test]
 fn buy_scales_to_six_decimal_mint() {
-    let (mut svm, admin, sponsor) = setup_listed();
+    let (mut svm, admin, sponsor) = setup_direct();
     let investor = new_investor(&mut svm, &admin);
     give_gbp6(&mut svm, &investor.pubkey(), 1_000_000_000);
 

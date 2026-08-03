@@ -9,9 +9,9 @@ use xcavate_whitelist::state::{Role, RoleAccount};
 /// Record that the property's SPV has been incorporated. The company is
 /// created off chain, so this is an attestation, signed by the dedicated
 /// SpvConfirmation role. Role possession only, on purpose: the flag moves no
-/// investor funds, and the role is protocol-operated. Callable from the
-/// first sold share on, so incorporation runs in parallel with the sale;
-/// settlement later requires the flag.
+/// investor funds, and the role is protocol-operated. Callable only once
+/// every share is reserved: the attestation locks the sale in and opens the
+/// claim window, which is what lets reserved money move.
 #[derive(Accounts)]
 #[instruction(listing_id: u64)]
 pub struct CreateSpv<'info> {
@@ -30,6 +30,7 @@ pub struct CreateSpv<'info> {
     pub confirmer_role: Box<Account<'info, RoleAccount>>,
 
     #[account(
+        mut,
         seeds = [LISTING_SEED, &listing_id.to_le_bytes()],
         bump = listing.bump,
     )]
@@ -44,16 +45,16 @@ pub struct CreateSpv<'info> {
 }
 
 pub fn create_spv_handler(ctx: Context<CreateSpv>, listing_id: u64) -> Result<()> {
+    // Selling out needs claims and claims need the SPV, so no later status
+    // can still be missing the attestation.
     require!(
-        matches!(
-            ctx.accounts.listing.status,
-            ListingStatus::Listed | ListingStatus::SoldOut | ListingStatus::Legal
-        ),
+        ctx.accounts.listing.status == ListingStatus::Listed,
         MarketplaceError::ListingNotActive
     );
     require!(
-        ctx.accounts.listing.sold_share_amount > 0,
-        MarketplaceError::NoSharesSold
+        ctx.accounts.listing.reserved_share_amount + ctx.accounts.listing.sold_share_amount
+            == ctx.accounts.listing.listed_share_amount,
+        MarketplaceError::NotFullyReserved
     );
     require!(
         !ctx.accounts.property.spv_created,
@@ -61,6 +62,13 @@ pub fn create_spv_handler(ctx: Context<CreateSpv>, listing_id: u64) -> Result<()
     );
 
     ctx.accounts.property.spv_created = true;
+    // The SPV existing is what lets reserved money move: the claim window
+    // opens now and direct purchases take over when it ends.
+    let listing = &mut ctx.accounts.listing;
+    listing.claim_deadline = Clock::get()?
+        .unix_timestamp
+        .checked_add(listing.claiming_time)
+        .ok_or(MarketplaceError::Overflow)?;
 
     emit!(SpvCreated {
         listing_id,

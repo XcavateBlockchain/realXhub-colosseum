@@ -94,7 +94,7 @@ pub mod marketplace {
     }
 
     pub fn unreserve_shares(ctx: Context<UnreserveShares>, listing_id: u64) -> Result<()> {
-        unreserve::unreserve_shares_handler(ctx, listing_id)
+        reserve::unreserve_shares_handler(ctx, listing_id)
     }
 
     pub fn close_cancelled_position(
@@ -102,7 +102,7 @@ pub mod marketplace {
         listing_id: u64,
         investor: Pubkey,
     ) -> Result<()> {
-        unreserve::close_cancelled_position_handler(ctx, listing_id, investor)
+        reserve::close_cancelled_position_handler(ctx, listing_id, investor)
     }
 
     pub fn create_spv(ctx: Context<CreateSpv>, listing_id: u64) -> Result<()> {
@@ -186,5 +186,30 @@ pub mod marketplace {
 
     pub fn resign_from_case(ctx: Context<ResignFromCase>, listing_id: u64) -> Result<()> {
         legal::resign_from_case_handler(ctx, listing_id)
+    }
+
+    pub fn reserve_shares(
+        ctx: Context<ReserveShares>,
+        listing_id: u64,
+        amount: u32,
+        max_total_cost: u64,
+    ) -> Result<()> {
+        reserve::reserve_shares_handler(ctx, listing_id, amount, max_total_cost)
+    }
+
+    pub fn claim_shares(ctx: Context<ClaimShares>, listing_id: u64) -> Result<()> {
+        reserve::claim_shares_handler(ctx, listing_id)
+    }
+
+    pub fn release_reservation(
+        ctx: Context<ReleaseReservation>,
+        listing_id: u64,
+        investor: Pubkey,
+    ) -> Result<()> {
+        reserve::release_reservation_handler(ctx, listing_id, investor)
+    }
+
+    pub fn close_reservation(ctx: Context<CloseReservation>) -> Result<()> {
+        reserve::close_reservation_handler(ctx)
     }
 }

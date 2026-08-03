@@ -1,13 +1,11 @@
-//! Unreserving: the full refund, the one-way re-buy bar, and the crank that
-//! reclaims cancelled positions once a listing stops selling.
+//! Unreserving, the one voluntary exit: an investor lets go of their
+//! reservation while the sale is still filling. Once every share is reserved
+//! the sale locks in and nobody backs out. Plus the crank that reclaims
+//! cancelled positions once a listing stops selling.
 
 mod common;
 use common::*;
 
-use anchor_spl::token_2022::spl_token_2022::{
-    extension::StateWithExtensions,
-    state::{Account as TokenAccountState, AccountState},
-};
 use marketplace::state::ListingStatus;
 
 /// Full pipeline up to an open listing, plus the sponsor.
@@ -32,31 +30,21 @@ fn setup_listed() -> (LiteSVM, Keypair, Keypair) {
     (svm, admin, sponsor())
 }
 
-fn buy(svm: &mut LiteSVM, investor: &Keypair, sponsor: &Keypair, amount: u32) {
+fn reserve(svm: &mut LiteSVM, investor: &Keypair, sponsor: &Keypair, amount: u32) {
     ok(
         svm,
-        buy_ix(&investor.pubkey(), &sponsor.pubkey(), 0, amount, u64::MAX),
+        reserve_ix(&investor.pubkey(), &sponsor.pubkey(), 0, amount, u64::MAX),
         sponsor,
         &[sponsor, investor],
     );
 }
 
-fn sell_out(svm: &mut LiteSVM, admin: &Keypair, sponsor: &Keypair) {
-    let a = new_investor(svm, admin);
-    let b = new_investor(svm, admin);
-    let c = new_investor(svm, admin);
-    buy(svm, &a, sponsor, 34);
-    buy(svm, &b, sponsor, 33);
-    buy(svm, &c, sponsor, 33);
-}
-
 #[test]
-fn unreserve_refunds_everything_and_returns_shares() {
+fn unreserve_releases_the_reservation() {
     let (mut svm, admin, sponsor) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
-    let tgbp_before = tgbp_balance(&svm, &investor.pubkey());
-    buy(&mut svm, &investor, &sponsor, 10);
-    buy(&mut svm, &investor, &sponsor, 15);
+    let before = tgbp_balance(&svm, &investor.pubkey());
+    reserve(&mut svm, &investor, &sponsor, 10);
 
     ok(
         &mut svm,
@@ -65,44 +53,24 @@ fn unreserve_refunds_everything_and_returns_shares() {
         &[&investor],
     );
 
-    // Money: everything back, fee and tax included.
-    assert_eq!(tgbp_balance(&svm, &investor.pubkey()), tgbp_before);
-    let vault_acc = svm.get_account(&listing_payment_ata(0)).unwrap();
-    let vault_state = StateWithExtensions::<TokenAccountState>::unpack(&vault_acc.data).unwrap();
-    assert_eq!(vault_state.base.amount, 0);
-
-    // Shares: back in the property vault; the investor's account is empty and
-    // locked again.
-    let vault_shares = svm.get_account(&vault_share_account(0)).unwrap();
-    let vault_shares =
-        StateWithExtensions::<TokenAccountState>::unpack(&vault_shares.data).unwrap();
-    assert_eq!(vault_shares.base.amount, SHARE_AMOUNT as u64);
-    let share_acc = svm
-        .get_account(&investor_share_ata(0, &investor.pubkey()))
-        .unwrap();
-    let share_state = StateWithExtensions::<TokenAccountState>::unpack(&share_acc.data).unwrap();
-    assert_eq!(share_state.base.amount, 0);
-    assert_eq!(share_state.base.state, AccountState::Frozen);
-
-    // Ledger: listing reopened in full, holding closed, position flagged.
-    assert_eq!(listing_of(&svm, 0).sold_share_amount, 0);
-    assert_eq!(property_of(&svm, 0).holder_count, 0);
-    assert!(svm
-        .get_account(&holding_pda(0, &investor.pubkey()))
-        .is_none_or(|a| a.data.is_empty()));
+    // The money never moved, so nothing comes back; only the ledger lets go.
+    assert_eq!(tgbp_balance(&svm, &investor.pubkey()), before);
+    assert_eq!(
+        reservation_of(&svm, &tgbp_acc(&investor.pubkey())).amount,
+        0
+    );
+    assert_eq!(listing_of(&svm, 0).reserved_share_amount, 0);
     let position = position_of(&svm, 0, &investor.pubkey());
     assert!(position.cancelled);
-    assert_eq!(position.share_amount, 0);
-    assert_eq!(position.paid_funds, 0);
+    assert_eq!(position.reserved_share_amount, 0);
 }
 
-// The one-way bar: once cancelled, this investor never buys this listing
-// again.
+// The one-way bar: once out, this investor never buys this listing again.
 #[test]
 fn unreserve_blocks_rebuy() {
     let (mut svm, admin, sponsor) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 10);
+    reserve(&mut svm, &investor, &sponsor, 10);
     ok(
         &mut svm,
         unreserve_ix(&investor.pubkey(), 0),
@@ -112,7 +80,7 @@ fn unreserve_blocks_rebuy() {
 
     fails_with(
         &mut svm,
-        buy_ix(&investor.pubkey(), &sponsor.pubkey(), 0, 10, u64::MAX),
+        reserve_ix(&investor.pubkey(), &sponsor.pubkey(), 0, 10, u64::MAX),
         &sponsor,
         &[&sponsor, &investor],
         "PositionCancelled",
@@ -123,7 +91,7 @@ fn unreserve_blocks_rebuy() {
 fn unreserve_twice_fails() {
     let (mut svm, admin, sponsor) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 10);
+    reserve(&mut svm, &investor, &sponsor, 10);
     ok(
         &mut svm,
         unreserve_ix(&investor.pubkey(), 0),
@@ -131,34 +99,73 @@ fn unreserve_twice_fails() {
         &[&investor],
     );
 
-    // The holding is gone, so the second attempt can't even resolve it.
     fails_with(
         &mut svm,
         unreserve_ix(&investor.pubkey(), 0),
         &investor,
         &[&investor],
-        "AccountNotInitialized",
+        "NothingReserved",
     );
 }
 
+// The last reserved share locks the sale in: from there a reservation is
+// claimed or expires, and the SPV can incorporate against a firm total.
 #[test]
-fn unreserve_after_sellout_fails() {
+fn unreserve_stops_at_full_reservation() {
     let (mut svm, admin, sponsor) = setup_listed();
-    let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 34);
+    let a = new_investor(&mut svm, &admin);
     let b = new_investor(&mut svm, &admin);
     let c = new_investor(&mut svm, &admin);
-    buy(&mut svm, &b, &sponsor, 33);
-    buy(&mut svm, &c, &sponsor, 33);
-    assert_eq!(listing_of(&svm, 0).status, ListingStatus::SoldOut);
+    let d = new_investor(&mut svm, &admin);
+    reserve(&mut svm, &a, &sponsor, 34);
+    reserve(&mut svm, &b, &sponsor, 33);
+    // While the sale is still filling, backing out works.
+    ok(&mut svm, unreserve_ix(&b.pubkey(), 0), &b, &[&b]);
 
-    // The sale is locked in; the legal phase owns the funds now.
+    reserve(&mut svm, &c, &sponsor, 33);
+    reserve(&mut svm, &d, &sponsor, 33);
     fails_with(
         &mut svm,
-        unreserve_ix(&investor.pubkey(), 0),
-        &investor,
-        &[&investor],
-        "ListingNotActive",
+        unreserve_ix(&a.pubkey(), 0),
+        &a,
+        &[&a],
+        "SaleLocked",
+    );
+}
+
+// Sweeping missed reservations after the window drops the reserved count
+// below full again, but the lock must hold: the deadline is the tell.
+#[test]
+fn unreserve_stays_barred_after_sweeps() {
+    let (mut svm, admin, sponsor) = setup_listed();
+    let a = new_investor(&mut svm, &admin);
+    let b = new_investor(&mut svm, &admin);
+    let c = new_investor(&mut svm, &admin);
+    reserve(&mut svm, &a, &sponsor, 34);
+    reserve(&mut svm, &b, &sponsor, 33);
+    reserve(&mut svm, &c, &sponsor, 33);
+    let confirmer = new_confirmer(&mut svm, &admin);
+    ok(
+        &mut svm,
+        create_spv_ix(&confirmer.pubkey(), 0),
+        &confirmer,
+        &[&confirmer],
+    );
+
+    warp(&mut svm, CLAIMING_TIME + 1);
+    let cranker = funded(&mut svm);
+    ok(
+        &mut svm,
+        release_reservation_ix(&cranker.pubkey(), 0, &b.pubkey()),
+        &cranker,
+        &[&cranker],
+    );
+    fails_with(
+        &mut svm,
+        unreserve_ix(&a.pubkey(), 0),
+        &a,
+        &[&a],
+        "SaleLocked",
     );
 }
 
@@ -168,8 +175,7 @@ fn unreserve_after_sellout_fails() {
 fn unreserve_works_after_role_removed() {
     let (mut svm, admin, sponsor) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
-    let tgbp_before = tgbp_balance(&svm, &investor.pubkey());
-    buy(&mut svm, &investor, &sponsor, 10);
+    reserve(&mut svm, &investor, &sponsor, 10);
     ok(
         &mut svm,
         roles_remove_ix(
@@ -188,72 +194,26 @@ fn unreserve_works_after_role_removed() {
         &investor,
         &[&investor],
     );
-    assert_eq!(tgbp_balance(&svm, &investor.pubkey()), tgbp_before);
+    assert_eq!(listing_of(&svm, 0).reserved_share_amount, 0);
 }
 
-// A position paid in the 6-decimal mint refunds in that mint, at its scale.
-#[test]
-fn unreserve_refunds_in_position_mint() {
-    let (mut svm, admin, sponsor) = setup_listed();
-    let investor = new_investor(&mut svm, &admin);
-    give_gbp6(&mut svm, &investor.pubkey(), 1_000_000_000);
-
-    let vault_ata = Pubkey::find_program_address(
-        &[
-            listing_vault_pda(0).as_ref(),
-            anchor_spl::token::ID.as_ref(),
-            gbp6_mint().as_ref(),
-        ],
-        &anchor_spl::associated_token::ID,
-    )
-    .0;
-    ok(
-        &mut svm,
-        buy_ix_with_mint(
-            &investor.pubkey(),
-            &sponsor.pubkey(),
-            0,
-            10,
-            u64::MAX,
-            gbp6_mint(),
-            gbp6_acc(&investor.pubkey()),
-            vault_ata,
-        ),
-        &sponsor,
-        &[&sponsor, &investor],
-    );
-
-    ok(
-        &mut svm,
-        unreserve_ix_with_mint(
-            &investor.pubkey(),
-            0,
-            gbp6_mint(),
-            gbp6_acc(&investor.pubkey()),
-            vault_ata,
-            anchor_spl::token::ID,
-        ),
-        &investor,
-        &[&investor],
-    );
-
-    let acc = svm.get_account(&gbp6_acc(&investor.pubkey())).unwrap();
-    let state = StateWithExtensions::<TokenAccountState>::unpack(&acc.data).unwrap();
-    assert_eq!(state.base.amount, 1_000_000_000);
-}
+// ==================== the cancelled-position crank ====================
 
 #[test]
 fn close_cancelled_position_reclaims_rent() {
     let (mut svm, admin, sponsor) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 10);
+    reserve(&mut svm, &investor, &sponsor, 10);
     ok(
         &mut svm,
         unreserve_ix(&investor.pubkey(), 0),
         &investor,
         &[&investor],
     );
-    sell_out(&mut svm, &admin, &sponsor);
+    let a = new_investor(&mut svm, &admin);
+    let b = new_investor(&mut svm, &admin);
+    let c = new_investor(&mut svm, &admin);
+    acquire_many(&mut svm, &admin, &[(&a, 34), (&b, 33), (&c, 33)]);
 
     let sponsor_before = svm.get_account(&sponsor.pubkey()).unwrap().lamports;
     let cranker = funded(&mut svm);
@@ -276,7 +236,7 @@ fn close_cancelled_position_reclaims_rent() {
 fn close_while_listing_active_fails() {
     let (mut svm, admin, sponsor) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 10);
+    reserve(&mut svm, &investor, &sponsor, 10);
     ok(
         &mut svm,
         unreserve_ix(&investor.pubkey(), 0),
@@ -295,7 +255,7 @@ fn close_while_listing_active_fails() {
     // And the re-buy stays barred the whole time.
     fails_with(
         &mut svm,
-        buy_ix(&investor.pubkey(), &sponsor.pubkey(), 0, 10, u64::MAX),
+        reserve_ix(&investor.pubkey(), &sponsor.pubkey(), 0, 10, u64::MAX),
         &sponsor,
         &[&sponsor, &investor],
         "PositionCancelled",
@@ -304,13 +264,11 @@ fn close_while_listing_active_fails() {
 
 #[test]
 fn close_requires_cancelled_position() {
-    let (mut svm, admin, sponsor) = setup_listed();
+    let (mut svm, admin, _sponsor) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 34);
     let b = new_investor(&mut svm, &admin);
     let c = new_investor(&mut svm, &admin);
-    buy(&mut svm, &b, &sponsor, 33);
-    buy(&mut svm, &c, &sponsor, 33);
+    acquire_many(&mut svm, &admin, &[(&investor, 34), (&b, 33), (&c, 33)]);
 
     // A live position holds real settlement accounting; the crank can't touch it.
     let cranker = funded(&mut svm);
@@ -330,7 +288,7 @@ fn close_requires_cancelled_position() {
 fn close_works_after_expiry_without_status_flip() {
     let (mut svm, admin, sponsor) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 10);
+    reserve(&mut svm, &investor, &sponsor, 10);
     ok(
         &mut svm,
         unreserve_ix(&investor.pubkey(), 0),

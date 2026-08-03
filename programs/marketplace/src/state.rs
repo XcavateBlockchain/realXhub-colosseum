@@ -47,6 +47,8 @@ pub struct Config {
     pub investor_fee_bps: u16,
     /// Largest slice of a property one investor may hold, in basis points.
     pub max_ownership_bps: u16,
+    /// Seconds the claim window stays open once the SPV exists.
+    pub claiming_time: i64,
     /// Seconds the legal process may run before it expires.
     pub legal_process_time: i64,
     /// Seconds the SPV lawyer election stays open once the first lawyer claims.
@@ -163,8 +165,11 @@ pub struct Listing {
     pub share_price: u64,
     /// Shares put up for sale.
     pub listed_share_amount: u32,
-    /// Shares sold so far.
+    /// Shares sold (paid for) so far.
     pub sold_share_amount: u32,
+    /// Shares reserved but not yet claimed. Reserved money stays in the
+    /// investors' own wallets until the claim pays for them.
+    pub reserved_share_amount: u32,
     /// Whether the developer covers the region's sale tax themselves.
     pub tax_paid_by_developer: bool,
     /// The region's sale tax at listing time, in basis points.
@@ -177,6 +182,12 @@ pub struct Listing {
     /// strictly below it, so even 10_000 requires at least two holders.
     pub max_ownership_bps: u16,
     pub listing_expiry: i64,
+    /// Seconds the claim window runs once the SPV exists, taken from config
+    /// at listing time.
+    pub claiming_time: i64,
+    /// When the claim window closes and direct purchases open. Zero until
+    /// the SPV attestation stamps it.
+    pub claim_deadline: i64,
     /// Seconds the legal process may run once the listing sells out, taken
     /// from config at listing time.
     pub legal_process_time: i64,
@@ -285,16 +296,40 @@ pub struct InvestorPosition {
     /// The mint the investor paid in. One mint per position: later buys must
     /// use the same one, so every refund is a single transfer.
     pub payment_mint: Pubkey,
+    /// The investor's token account the reservation is recorded against and
+    /// the claim later pays from.
+    pub payment_account: Pubkey,
+    /// Shares paid for and delivered.
     pub share_amount: u32,
+    /// Shares reserved and not yet claimed; a claim converts all of them at
+    /// once, so a position is only ever reserved or paid, not both.
+    pub reserved_share_amount: u32,
     /// Paid toward the property price, in payment-mint base units.
     pub paid_funds: u64,
     /// Paid as sale tax on top, in payment-mint base units.
     pub paid_tax: u64,
     /// Paid as the investor fee on top, in payment-mint base units.
     pub paid_fee: u64,
+    /// Reserved toward the property price, still in the investor's wallet.
+    pub reserved_funds: u64,
+    /// Reserved for the sale tax, still in the investor's wallet.
+    pub reserved_tax: u64,
+    /// Reserved for the investor fee, still in the investor's wallet.
+    pub reserved_fee: u64,
     /// Set when the investor unreserved. The position stays open as the
     /// one-way re-buy bar: `buy` rejects a cancelled position forever.
     pub cancelled: bool,
+    pub bump: u8,
+}
+
+/// Payment money promised to unclaimed reservations, one record per token
+/// account, summed across every listing the owner reserved into. Reserving
+/// checks the balance covers it; only the claim actually collects.
+#[account]
+#[derive(InitSpace)]
+pub struct Reservation {
+    pub token_account: Pubkey,
+    pub amount: u64,
     pub bump: u8,
 }
 

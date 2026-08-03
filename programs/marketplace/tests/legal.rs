@@ -33,32 +33,17 @@ fn setup_sold_out() -> (LiteSVM, Keypair, Keypair, (Keypair, Keypair, Keypair)) 
         &developer,
         &[&developer],
     );
-    let sponsor = sponsor();
     let a = new_investor(&mut svm, &admin);
     let b = new_investor(&mut svm, &admin);
     let c = new_investor(&mut svm, &admin);
-    for (investor, amount) in [(&a, 34), (&b, 33), (&c, 33)] {
-        ok(
-            &mut svm,
-            buy_ix(&investor.pubkey(), &sponsor.pubkey(), 0, amount, u64::MAX),
-            &sponsor,
-            &[&sponsor, investor],
-        );
-    }
+    acquire_many(&mut svm, &admin, &[(&a, 34), (&b, 33), (&c, 33)]);
     (svm, admin, developer, (a, b, c))
 }
 
-/// `setup_sold_out` plus the SPV attestation, so the SPV side can be run.
+/// Selling out already runs through the SPV attestation, so the SPV side is
+/// always ready; the alias keeps the tests reading by what they need.
 fn setup_with_spv() -> (LiteSVM, Keypair, Keypair, (Keypair, Keypair, Keypair)) {
-    let (mut svm, admin, developer, investors) = setup_sold_out();
-    let confirmer = new_confirmer(&mut svm, &admin);
-    ok(
-        &mut svm,
-        create_spv_ix(&confirmer.pubkey(), 0),
-        &confirmer,
-        &[&confirmer],
-    );
-    (svm, admin, developer, investors)
+    setup_sold_out()
 }
 
 // ========================== developer side ==========================
@@ -188,19 +173,6 @@ fn assign_only_once() {
 }
 
 // ========================== SPV-side election ==========================
-
-#[test]
-fn claim_requires_the_spv() {
-    let (mut svm, admin, _developer, _investors) = setup_sold_out();
-    let lawyer = new_registered_lawyer(&mut svm, &admin, 1);
-    fails_with(
-        &mut svm,
-        claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
-        &lawyer,
-        &[&lawyer],
-        "SpvNotCreated",
-    );
-}
 
 #[test]
 fn first_claim_opens_the_window() {

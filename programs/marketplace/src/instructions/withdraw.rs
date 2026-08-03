@@ -193,6 +193,12 @@ fn settle_dead_listing_exit(
 ) -> Result<(u32, u64, Pubkey)> {
     let amount = ctx.accounts.position.share_amount;
     require!(amount > 0, MarketplaceError::NothingToUnreserve);
+    // Closing the position would orphan an unclaimed reservation: the
+    // position is the only key to it. The release crank clears it first.
+    require!(
+        ctx.accounts.position.reserved_share_amount == 0,
+        MarketplaceError::ReservationOutstanding
+    );
     // The ledger must agree with the position before it closes on the
     // position's number, and no locked share may leave.
     require!(

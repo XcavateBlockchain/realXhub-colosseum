@@ -1,11 +1,12 @@
 //! Property-based solvency: random walks over the whole primary lifecycle
-//! (buy, unreserve, expiry, both withdraws, the cranks, teardown, and the
-//! SPV lawyer election) must keep the listing vault equal to what open
-//! positions are owed, the share supply conserved between the property vault
-//! and the holders, every counter in agreement with the accounts, and every
-//! locked share backed by exactly one live vote record. Cross-checking the
-//! accounts against each other needs no model, so any drift in any writer
-//! shows up here.
+//! (reserve, claim, buy, unreserve, expiry, both withdraws, the cranks,
+//! teardown, and the SPV lawyer election) must keep the listing vault equal
+//! to what paid positions are owed, every reservation equal to its
+//! position's reserved cost, the share supply conserved between the
+//! property vault and the holders, every
+//! counter in agreement with the accounts, and every locked share backed by
+//! exactly one live vote record. Cross-checking the accounts against each
+//! other needs no model, so any drift in any writer shows up here.
 
 mod common;
 use common::*;
@@ -78,20 +79,32 @@ fn check_invariants(
 
     let mut owed = 0u64;
     let mut position_shares = 0u32;
+    let mut reserved_shares = 0u32;
     let mut open_positions = 0u32;
     let mut holders = 0u32;
     let mut held_shares = 0u64;
     for investor in investors {
+        let mut reserved_cost = 0u64;
         if account_alive(svm, &position_pda(0, &investor.pubkey())) {
             let p = position_of(svm, 0, &investor.pubkey());
             owed += p.paid_funds + p.paid_fee + p.paid_tax;
+            reserved_cost = p.reserved_funds + p.reserved_fee + p.reserved_tax;
             position_shares += p.share_amount;
+            reserved_shares += p.reserved_share_amount;
             open_positions += 1;
         }
         if account_alive(svm, &holding_pda(0, &investor.pubkey())) {
             holders += 1;
             held_shares += holding_of(svm, 0, &investor.pubkey()).amount as u64;
         }
+        // The reservation record always matches the position's reserved cost.
+        let reservation_acc = reservation_pda(&tgbp_acc(&investor.pubkey()));
+        let reserved_amount = if account_alive(svm, &reservation_acc) {
+            reservation_of(svm, &tgbp_acc(&investor.pubkey())).amount
+        } else {
+            0
+        };
+        prop_assert_eq!(reserved_amount, reserved_cost);
     }
     // Money: the vault holds exactly what open positions are owed.
     prop_assert_eq!(token_balance(svm, &listing_payment_ata(0)), owed);
@@ -104,6 +117,7 @@ fn check_invariants(
     // Counters: agree with the accounts they summarize.
     let listing = listing_of(svm, 0);
     prop_assert_eq!(listing.sold_share_amount, position_shares);
+    prop_assert_eq!(listing.reserved_share_amount, reserved_shares);
     prop_assert_eq!(listing.position_count, open_positions);
     prop_assert_eq!(property_of(svm, 0).holder_count, holders);
 
@@ -143,7 +157,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(16))]
     #[test]
     fn random_lifecycle_walks_stay_solvent(
-        ops in proptest::collection::vec((0u8..3u8, 0u8..12u8, 1u32..30u32), 1..14)
+        ops in proptest::collection::vec((0u8..3u8, 0u8..16u8, 1u32..30u32), 1..14)
     ) {
         let (mut svm, admin, _authority) = setup();
         let operator = funded(&mut svm);
@@ -239,6 +253,31 @@ proptest! {
                 10 => {
                     let round = listing_of(&svm, 0).spv_election.round;
                     let ix = unlock_votes_ix(&investor.pubkey(), 0, round);
+                    let _ = process(&mut svm, ix, investor, &[investor]);
+                }
+                11 => {
+                    let ix =
+                        reserve_ix(&investor.pubkey(), &sponsor.pubkey(), 0, amount, u64::MAX);
+                    let _ = process(&mut svm, ix, &sponsor, &[&sponsor, investor]);
+                }
+                12 => {
+                    let ix = claim_ix(&investor.pubkey(), &sponsor.pubkey(), 0);
+                    let _ = process(&mut svm, ix, &sponsor, &[&sponsor, investor]);
+                }
+                13 => {
+                    // Reserve whatever is left, aiming for the lock-in that
+                    // create_spv and the claims need.
+                    let listing = listing_of(&svm, 0);
+                    let left = listing.listed_share_amount
+                        - listing.sold_share_amount
+                        - listing.reserved_share_amount;
+                    let ix =
+                        reserve_ix(&investor.pubkey(), &sponsor.pubkey(), 0, left, u64::MAX);
+                    let _ = process(&mut svm, ix, &sponsor, &[&sponsor, investor]);
+                }
+                14 => {
+                    let ix =
+                        release_reservation_ix(&investor.pubkey(), 0, &investors[0].pubkey());
                     let _ = process(&mut svm, ix, investor, &[investor]);
                 }
                 _ => {

@@ -45,6 +45,7 @@ pub const SHARE_PRICE: u64 = 5_000_000_000;
 pub const SHARE_AMOUNT: u32 = 100;
 /// Matches the `listing_duration` that `seed_region` writes.
 pub const LISTING_DURATION: i64 = 100_000;
+pub const CLAIMING_TIME: i64 = 50_000;
 pub const POSTCODE: &[u8] = b"SW1A1AA";
 
 // --- ids / PDAs ---
@@ -218,6 +219,18 @@ pub fn set_mint(svm: &mut LiteSVM) {
     // every accepted entry exists and passes the mint guard.
     set_mint_at(svm, tgbp_mint(), 9);
     set_mint_at(svm, gbp6_mint(), 6);
+}
+
+/// The marketplace's reservation PDA for a payment token account.
+pub fn reservation_pda(token_account: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            marketplace::constants::RESERVATION_SEED,
+            token_account.as_ref(),
+        ],
+        &mid(),
+    )
+    .0
 }
 
 pub fn set_mint_at(svm: &mut LiteSVM, address: Pubkey, decimals: u8) {
@@ -499,6 +512,7 @@ pub fn default_params() -> ConfigParams {
         marketplace_fee_bps: 100,
         investor_fee_bps: 100,
         max_ownership_bps: 5_000,
+        claiming_time: CLAIMING_TIME,
         legal_process_time: 100_000,
         lawyer_voting_time: 10_000,
         min_voting_quorum_bps: 2_500,
@@ -856,38 +870,93 @@ pub fn buy_ix_with_mint(
     )
 }
 
-pub fn unreserve_ix(investor: &Pubkey, listing_id: u64) -> Instruction {
-    unreserve_ix_with_mint(
+pub fn reserve_ix(
+    investor: &Pubkey,
+    payer: &Pubkey,
+    listing_id: u64,
+    amount: u32,
+    max_total_cost: u64,
+) -> Instruction {
+    reserve_ix_with_mint(
         investor,
+        payer,
+        listing_id,
+        amount,
+        max_total_cost,
+        tgbp_mint(),
+        tgbp_acc(investor),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn reserve_ix_with_mint(
+    investor: &Pubkey,
+    payer: &Pubkey,
+    listing_id: u64,
+    amount: u32,
+    max_total_cost: u64,
+    payment_mint: Pubkey,
+    investor_payment: Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::ReserveShares {
+            listing_id,
+            amount,
+            max_total_cost,
+        }
+        .data(),
+        marketplace::accounts::ReserveShares {
+            investor: *investor,
+            payer: *payer,
+            config: marketplace_config(),
+            investor_role: role_pda(investor, Role::RealEstateInvestor),
+            listing: listing_pda(listing_id),
+            property: property_pda(listing_id),
+            position: position_pda(listing_id, investor),
+            payment_mint,
+            investor_payment,
+            reservation: reservation_pda(&investor_payment),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn claim_ix(investor: &Pubkey, payer: &Pubkey, listing_id: u64) -> Instruction {
+    claim_ix_with_mint(
+        investor,
+        payer,
         listing_id,
         tgbp_mint(),
         tgbp_acc(investor),
         listing_payment_ata(listing_id),
-        TOKEN_PROGRAM_ID,
     )
 }
 
-pub fn unreserve_ix_with_mint(
+pub fn claim_ix_with_mint(
     investor: &Pubkey,
+    payer: &Pubkey,
     listing_id: u64,
     payment_mint: Pubkey,
     investor_payment: Pubkey,
     listing_payment_account: Pubkey,
-    payment_token_program: Pubkey,
 ) -> Instruction {
     Instruction::new_with_bytes(
         mid(),
-        &marketplace::instruction::UnreserveShares { listing_id }.data(),
-        marketplace::accounts::UnreserveShares {
+        &marketplace::instruction::ClaimShares { listing_id }.data(),
+        marketplace::accounts::ClaimShares {
             investor: *investor,
+            payer: *payer,
             config: marketplace_config(),
-            rent_collector: sponsor().pubkey(),
+            investor_role: role_pda(investor, Role::RealEstateInvestor),
             listing: listing_pda(listing_id),
             property: property_pda(listing_id),
             position: position_pda(listing_id, investor),
             holding: holding_pda(listing_id, investor),
             payment_mint,
             investor_payment,
+            reservation: reservation_pda(&investor_payment),
             listing_vault: listing_vault_pda(listing_id),
             listing_payment_account,
             share_mint: share_mint_pda(listing_id),
@@ -895,11 +964,147 @@ pub fn unreserve_ix_with_mint(
             property_vault: property_vault_pda(listing_id),
             vault_share_account: vault_share_account(listing_id),
             investor_share_account: investor_share_ata(listing_id, investor),
-            payment_token_program,
+            payment_token_program: TOKEN_PROGRAM_ID,
             share_token_program: anchor_spl::token_2022::ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
         }
         .to_account_metas(None),
     )
+}
+
+pub fn unreserve_ix(investor: &Pubkey, listing_id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::UnreserveShares { listing_id }.data(),
+        marketplace::accounts::UnreserveShares {
+            investor: *investor,
+            listing: listing_pda(listing_id),
+            position: position_pda(listing_id, investor),
+            reservation: reservation_pda(&tgbp_acc(investor)),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn release_reservation_ix(cranker: &Pubkey, listing_id: u64, investor: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::ReleaseReservation {
+            listing_id,
+            investor: *investor,
+        }
+        .data(),
+        marketplace::accounts::ReleaseReservation {
+            cranker: *cranker,
+            config: marketplace_config(),
+            rent_collector: sponsor().pubkey(),
+            listing: listing_pda(listing_id),
+            position: position_pda(listing_id, investor),
+            reservation: reservation_pda(&tgbp_acc(investor)),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn close_reservation_ix(cranker: &Pubkey, token_account: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::CloseReservation {}.data(),
+        marketplace::accounts::CloseReservation {
+            cranker: *cranker,
+            config: marketplace_config(),
+            rent_collector: sponsor().pubkey(),
+            reservation: reservation_pda(token_account),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn reservation_of(svm: &LiteSVM, token_account: &Pubkey) -> marketplace::state::Reservation {
+    marketplace::state::Reservation::try_deserialize(
+        &mut &svm
+            .get_account(&reservation_pda(token_account))
+            .unwrap()
+            .data[..],
+    )
+    .unwrap()
+}
+
+/// Reserve the shares of listing 0 that nobody else has yet, using throwaway
+/// filler investors in cap-sized chunks, so the sale can lock in.
+pub fn fill_reserve(svm: &mut LiteSVM, admin: &Keypair) -> Vec<Keypair> {
+    let sponsor = sponsor();
+    let listing = listing_of(svm, 0);
+    let mut left =
+        listing.listed_share_amount - listing.sold_share_amount - listing.reserved_share_amount;
+    let mut fillers = Vec::new();
+    while left > 0 {
+        let amount = left.min(49);
+        let filler = new_investor(svm, admin);
+        ok(
+            svm,
+            reserve_ix(&filler.pubkey(), &sponsor.pubkey(), 0, amount, u64::MAX),
+            &sponsor,
+            &[&sponsor, &filler],
+        );
+        left -= amount;
+        fillers.push(filler);
+    }
+    fillers
+}
+
+/// The shortest path to paid shares under the lock-in rule: the buyers
+/// reserve, fillers take whatever is left so the sale is fully reserved, the
+/// SPV attests, and the buyers claim. Any fillers then sit out the claim
+/// window and get released, which leaves the listing `Listed` with exactly
+/// the buyers' shares sold, the rest open for direct purchase, and the clock
+/// past the window. Buyers summing to every share means no fillers, no warp,
+/// and a sold-out listing.
+pub fn acquire_many(svm: &mut LiteSVM, admin: &Keypair, buyers: &[(&Keypair, u32)]) {
+    let sponsor = sponsor();
+    for (investor, amount) in buyers {
+        ok(
+            svm,
+            reserve_ix(&investor.pubkey(), &sponsor.pubkey(), 0, *amount, u64::MAX),
+            &sponsor,
+            &[&sponsor, investor],
+        );
+    }
+    let fillers = fill_reserve(svm, admin);
+    if !property_of(svm, 0).spv_created {
+        let confirmer = new_confirmer(svm, admin);
+        ok(
+            svm,
+            create_spv_ix(&confirmer.pubkey(), 0),
+            &confirmer,
+            &[&confirmer],
+        );
+    }
+    for (investor, _) in buyers {
+        ok(
+            svm,
+            claim_ix(&investor.pubkey(), &sponsor.pubkey(), 0),
+            &sponsor,
+            &[&sponsor, investor],
+        );
+    }
+    if !fillers.is_empty() {
+        warp(svm, CLAIMING_TIME + 1);
+        let cranker = funded(svm);
+        for filler in &fillers {
+            ok(
+                svm,
+                release_reservation_ix(&cranker.pubkey(), 0, &filler.pubkey()),
+                &cranker,
+                &[&cranker],
+            );
+        }
+    }
+}
+
+pub fn acquire(svm: &mut LiteSVM, admin: &Keypair, investor: &Keypair, amount: u32) {
+    acquire_many(svm, admin, &[(investor, amount)]);
 }
 
 pub fn close_position_ix(cranker: &Pubkey, listing_id: u64, investor: &Pubkey) -> Instruction {

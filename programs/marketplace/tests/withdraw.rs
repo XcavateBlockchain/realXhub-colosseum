@@ -29,22 +29,18 @@ fn setup_listed() -> (LiteSVM, Keypair, Keypair, Keypair) {
     (svm, admin, sponsor(), developer)
 }
 
-fn buy(svm: &mut LiteSVM, investor: &Keypair, sponsor: &Keypair, amount: u32) {
-    ok(
-        svm,
-        buy_ix(&investor.pubkey(), &sponsor.pubkey(), 0, amount, u64::MAX),
-        sponsor,
-        &[sponsor, investor],
-    );
+fn buy(svm: &mut LiteSVM, admin: &Keypair, investor: &Keypair, amount: u32) {
+    acquire(svm, admin, investor, amount);
 }
 
 // ============================ create_spv ============================
 
 #[test]
 fn create_spv_records_the_attestation() {
-    let (mut svm, admin, sponsor, _developer) = setup_listed();
-    let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 1);
+    let (mut svm, admin, _sponsor, _developer) = setup_listed();
+    // The attestation needs every share reserved; it locks the sale in and
+    // opens the claim window.
+    let _investors = fill_reserve(&mut svm, &admin);
 
     let confirmer = new_confirmer(&mut svm, &admin);
     ok(
@@ -54,6 +50,7 @@ fn create_spv_records_the_attestation() {
         &[&confirmer],
     );
     assert!(property_of(&svm, 0).spv_created);
+    assert!(listing_of(&svm, 0).claim_deadline > 0);
 
     // Attesting twice makes no sense.
     fails_with(
@@ -67,9 +64,8 @@ fn create_spv_records_the_attestation() {
 
 #[test]
 fn create_spv_requires_role() {
-    let (mut svm, admin, sponsor, _developer) = setup_listed();
-    let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 1);
+    let (mut svm, admin, _sponsor, _developer) = setup_listed();
+    let _investors = fill_reserve(&mut svm, &admin);
 
     let stranger = funded(&mut svm);
     fails_with(
@@ -82,15 +78,31 @@ fn create_spv_requires_role() {
 }
 
 #[test]
-fn create_spv_requires_a_sold_share() {
-    let (mut svm, admin, _sponsor, _developer) = setup_listed();
+fn create_spv_requires_full_reservation() {
+    let (mut svm, admin, sponsor, _developer) = setup_listed();
     let confirmer = new_confirmer(&mut svm, &admin);
     fails_with(
         &mut svm,
         create_spv_ix(&confirmer.pubkey(), 0),
         &confirmer,
         &[&confirmer],
-        "NoSharesSold",
+        "NotFullyReserved",
+    );
+
+    // A nearly full sale is still not locked in.
+    let investor = new_investor(&mut svm, &admin);
+    ok(
+        &mut svm,
+        reserve_ix(&investor.pubkey(), &sponsor.pubkey(), 0, 49, u64::MAX),
+        &sponsor,
+        &[&sponsor, &investor],
+    );
+    fails_with(
+        &mut svm,
+        create_spv_ix(&confirmer.pubkey(), 0),
+        &confirmer,
+        &[&confirmer],
+        "NotFullyReserved",
     );
 }
 
@@ -98,10 +110,10 @@ fn create_spv_requires_a_sold_share() {
 
 #[test]
 fn withdraw_expired_refunds_and_closes() {
-    let (mut svm, admin, sponsor, _developer) = setup_listed();
+    let (mut svm, admin, _sponsor, _developer) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
     let tgbp_before = tgbp_balance(&svm, &investor.pubkey());
-    buy(&mut svm, &investor, &sponsor, 10);
+    buy(&mut svm, &admin, &investor, 10);
 
     warp(&mut svm, LISTING_DURATION + 1);
     ok(
@@ -126,9 +138,9 @@ fn withdraw_expired_refunds_and_closes() {
 
 #[test]
 fn withdraw_expired_before_expiry_fails() {
-    let (mut svm, admin, sponsor, _developer) = setup_listed();
+    let (mut svm, admin, _sponsor, _developer) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 10);
+    buy(&mut svm, &admin, &investor, 10);
 
     fails_with(
         &mut svm,
@@ -141,13 +153,8 @@ fn withdraw_expired_before_expiry_fails() {
 
 #[test]
 fn withdraw_expired_after_sellout_fails() {
-    let (mut svm, admin, sponsor, _developer) = setup_listed();
-    let a = new_investor(&mut svm, &admin);
-    let b = new_investor(&mut svm, &admin);
-    let c = new_investor(&mut svm, &admin);
-    buy(&mut svm, &a, &sponsor, 34);
-    buy(&mut svm, &b, &sponsor, 33);
-    buy(&mut svm, &c, &sponsor, 33);
+    let (mut svm, admin, _sponsor, _developer) = setup_listed();
+    let (a, _b, _c) = sell_out_three(&mut svm, &admin);
 
     // A sold-out sale belongs to the legal phase, expiry or not.
     warp(&mut svm, LISTING_DURATION + 1);
@@ -160,13 +167,20 @@ fn withdraw_expired_after_sellout_fails() {
     );
 }
 
+fn sell_out_three(svm: &mut LiteSVM, admin: &Keypair) -> (Keypair, Keypair, Keypair) {
+    let a = new_investor(svm, admin);
+    let b = new_investor(svm, admin);
+    let c = new_investor(svm, admin);
+    acquire_many(svm, admin, &[(&a, 34), (&b, 33), (&c, 33)]);
+    (a, b, c)
+}
+
 #[test]
 fn second_investor_withdraws_after_status_flip() {
-    let (mut svm, admin, sponsor, _developer) = setup_listed();
+    let (mut svm, admin, _sponsor, _developer) = setup_listed();
     let a = new_investor(&mut svm, &admin);
     let b = new_investor(&mut svm, &admin);
-    buy(&mut svm, &a, &sponsor, 10);
-    buy(&mut svm, &b, &sponsor, 20);
+    acquire_many(&mut svm, &admin, &[(&a, 10), (&b, 20)]);
 
     warp(&mut svm, LISTING_DURATION + 1);
     ok(&mut svm, withdraw_expired_ix(&a.pubkey(), 0), &a, &[&a]);
@@ -181,7 +195,12 @@ fn second_investor_withdraws_after_status_flip() {
 fn expiry_flip_opens_the_cancelled_crank() {
     let (mut svm, admin, sponsor, _developer) = setup_listed();
     let cancelled = new_investor(&mut svm, &admin);
-    buy(&mut svm, &cancelled, &sponsor, 5);
+    ok(
+        &mut svm,
+        reserve_ix(&cancelled.pubkey(), &sponsor.pubkey(), 0, 5, u64::MAX),
+        &sponsor,
+        &[&sponsor, &cancelled],
+    );
     ok(
         &mut svm,
         unreserve_ix(&cancelled.pubkey(), 0),
@@ -189,7 +208,7 @@ fn expiry_flip_opens_the_cancelled_crank() {
         &[&cancelled],
     );
     let holder = new_investor(&mut svm, &admin);
-    buy(&mut svm, &holder, &sponsor, 10);
+    buy(&mut svm, &admin, &holder, 10);
 
     warp(&mut svm, LISTING_DURATION + 1);
     ok(
@@ -285,9 +304,9 @@ fn deposit_requires_the_listing_developer() {
 
 #[test]
 fn deposit_blocked_while_shares_outstanding() {
-    let (mut svm, admin, sponsor, developer) = setup_listed();
+    let (mut svm, admin, _sponsor, developer) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 10);
+    buy(&mut svm, &admin, &investor, 10);
     warp(&mut svm, LISTING_DURATION + 1);
 
     fails_with(
@@ -327,26 +346,12 @@ fn deposit_blocked_before_expiry() {
 
 // ============================ legal timeout + teardown ============================
 
-fn sell_out_three(
-    svm: &mut LiteSVM,
-    admin: &Keypair,
-    sponsor: &Keypair,
-) -> (Keypair, Keypair, Keypair) {
-    let a = new_investor(svm, admin);
-    let b = new_investor(svm, admin);
-    let c = new_investor(svm, admin);
-    buy(svm, &a, sponsor, 34);
-    buy(svm, &b, sponsor, 33);
-    buy(svm, &c, sponsor, 33);
-    (a, b, c)
-}
-
 // The success path must never be a trap: once the legal window runs out on a
 // sold-out sale, every investor can leave with their money.
 #[test]
 fn legal_timeout_reopens_the_exits() {
-    let (mut svm, admin, sponsor, developer) = setup_listed();
-    let (a, b, c) = sell_out_three(&mut svm, &admin, &sponsor);
+    let (mut svm, admin, _sponsor, developer) = setup_listed();
+    let (a, b, c) = sell_out_three(&mut svm, &admin);
     assert!(listing_of(&svm, 0).legal_deadline > 0);
 
     // Before the deadline the sale still belongs to the lawyers.
@@ -402,9 +407,9 @@ fn legal_timeout_reopens_the_exits() {
 
 #[test]
 fn legal_timeout_requires_sold_out() {
-    let (mut svm, admin, sponsor, _developer) = setup_listed();
+    let (mut svm, admin, _sponsor, _developer) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 10);
+    buy(&mut svm, &admin, &investor, 10);
     fails_with(
         &mut svm,
         withdraw_legal_expired_ix(&investor.pubkey(), 0),
@@ -419,7 +424,7 @@ fn legal_timeout_requires_sold_out() {
 #[test]
 fn close_dead_listing_sweeps_everything() {
     let (mut svm, admin, sponsor, developer) = setup_listed();
-    let (a, b, c) = sell_out_three(&mut svm, &admin, &sponsor);
+    let (a, b, c) = sell_out_three(&mut svm, &admin);
     warp(&mut svm, 100_001);
     ok(
         &mut svm,
@@ -493,11 +498,11 @@ fn close_dead_listing_requires_terminal_status() {
 
 #[test]
 fn close_dead_listing_requires_deposit_withdrawn() {
-    let (mut svm, admin, sponsor, developer) = setup_listed();
+    let (mut svm, admin, _sponsor, developer) = setup_listed();
     // The investor's withdraw flips the listing to Expired and drains the
     // shares, leaving the deposit as the only thing still held.
     let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 10);
+    buy(&mut svm, &admin, &investor, 10);
     warp(&mut svm, LISTING_DURATION + 1);
     ok(
         &mut svm,
@@ -559,7 +564,12 @@ fn close_dead_listing_from_pending_assets() {
 fn teardown_waits_for_cancelled_positions() {
     let (mut svm, admin, sponsor, developer) = setup_listed();
     let investor = new_investor(&mut svm, &admin);
-    buy(&mut svm, &investor, &sponsor, 5);
+    ok(
+        &mut svm,
+        reserve_ix(&investor.pubkey(), &sponsor.pubkey(), 0, 5, u64::MAX),
+        &sponsor,
+        &[&sponsor, &investor],
+    );
     ok(
         &mut svm,
         unreserve_ix(&investor.pubkey(), 0),
@@ -578,13 +588,7 @@ fn teardown_waits_for_cancelled_positions() {
     let cranker = funded(&mut svm);
     fails_with(
         &mut svm,
-        close_dead_listing_ix(
-            &cranker.pubkey(),
-            0,
-            &developer.pubkey(),
-            true,
-            &[listing_payment_ata(0)],
-        ),
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true, &[]),
         &cranker,
         &[&cranker],
         "PositionsOutstanding",
@@ -599,13 +603,7 @@ fn teardown_waits_for_cancelled_positions() {
     );
     ok(
         &mut svm,
-        close_dead_listing_ix(
-            &cranker.pubkey(),
-            0,
-            &developer.pubkey(),
-            true,
-            &[listing_payment_ata(0)],
-        ),
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true, &[]),
         &cranker,
         &[&cranker],
     );

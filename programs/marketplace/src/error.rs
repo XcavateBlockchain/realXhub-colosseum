@@ -80,9 +80,9 @@ pub enum MarketplaceError {
     /// The listing is still selling, so the position must stay open.
     #[msg("Listing is still active")]
     ListingStillActive,
-    /// No share has been sold yet.
-    #[msg("No shares sold")]
-    NoSharesSold,
+    /// The sale is not fully reserved yet.
+    #[msg("Not every share is reserved")]
+    NotFullyReserved,
     /// The SPV was already confirmed for this property.
     #[msg("SPV already created")]
     SpvAlreadyCreated,
@@ -170,4 +170,22 @@ pub enum MarketplaceError {
     /// A lawyer is still engaged on the case and must resign first.
     #[msg("Lawyer still engaged on the case")]
     LawyerStillEngaged,
+    /// The claim window has closed.
+    #[msg("Claim window has closed")]
+    ClaimWindowClosed,
+    /// Direct purchases open once the claim window has run out.
+    #[msg("Direct purchase is not open yet")]
+    DirectBuyNotOpen,
+    /// The position has no reserved shares.
+    #[msg("Nothing reserved")]
+    NothingReserved,
+    /// The payment account holds less than the reservation needs.
+    #[msg("Balance too low to reserve")]
+    BalanceTooLow,
+    /// The position still has unclaimed reserved shares.
+    #[msg("Reservation outstanding")]
+    ReservationOutstanding,
+    /// Backing out ends once every share is reserved.
+    #[msg("The sale is locked in")]
+    SaleLocked,
 }

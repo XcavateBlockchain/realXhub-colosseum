@@ -177,12 +177,15 @@ pub fn list_property_handler(
     listing.share_price = share_price;
     listing.listed_share_amount = share_amount;
     listing.sold_share_amount = 0;
+    listing.reserved_share_amount = 0;
     listing.tax_paid_by_developer = tax_paid_by_developer;
     listing.tax_bps = ctx.accounts.region.tax_bps;
     listing.marketplace_fee_bps = config.marketplace_fee_bps;
     listing.investor_fee_bps = config.investor_fee_bps;
     listing.max_ownership_bps = config.max_ownership_bps;
     listing.listing_expiry = listing_expiry;
+    listing.claiming_time = config.claiming_time;
+    listing.claim_deadline = 0;
     listing.legal_process_time = config.legal_process_time;
     listing.lawyer_voting_time = config.lawyer_voting_time;
     listing.min_voting_quorum_bps = config.min_voting_quorum_bps;

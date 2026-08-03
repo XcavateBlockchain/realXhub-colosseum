@@ -33,11 +33,36 @@ fn bps_of(value: u64, bps: u16) -> Result<u64> {
         .map_err(|_| MarketplaceError::Overflow.into())
 }
 
-/// Buy shares of a listed property: the funds land in the listing vault and
-/// the shares are delivered to the investor in the same instruction. No claim
-/// step. RealEstateInvestor-only and compliance-gated, since this is investor
-/// money moving. The sponsor `payer` fronts all account rent, per the rent
-/// policy; the investor themselves never needs SOL.
+/// Price a purchase of `amount` shares off the listing snapshots, rescaled
+/// to the payment mint: the funds, the investor fee, and the tax.
+pub(crate) fn price_purchase(
+    listing: &Listing,
+    amount: u32,
+    mint_decimals: u8,
+) -> Result<(u64, u64, u64)> {
+    let price_total = listing
+        .share_price
+        .checked_mul(amount as u64)
+        .ok_or(MarketplaceError::Overflow)?;
+    let funds = scale_to_mint(price_total, mint_decimals)?;
+    let fee = scale_to_mint(
+        bps_of(price_total, listing.investor_fee_bps)?,
+        mint_decimals,
+    )?;
+    let tax = if listing.tax_paid_by_developer {
+        0
+    } else {
+        scale_to_mint(bps_of(price_total, listing.tax_bps)?, mint_decimals)?
+    };
+    Ok((funds, fee, tax))
+}
+
+/// Buy shares directly, the post-claim-window market: once the window has
+/// run out, the funds land in the listing vault and the shares are delivered
+/// to the investor in the same instruction. RealEstateInvestor-only and
+/// compliance-gated, since this is investor money moving. The sponsor
+/// `payer` fronts all account rent, per the rent policy; the investor
+/// themselves never needs SOL.
 #[derive(Accounts)]
 #[instruction(listing_id: u64)]
 pub struct BuyPropertyShares<'info> {
@@ -167,22 +192,35 @@ pub fn buy_property_shares_handler(
         listing.status == ListingStatus::Listed,
         MarketplaceError::ListingNotActive
     );
+    let now = Clock::get()?.unix_timestamp;
     require!(
-        Clock::get()?.unix_timestamp < listing.listing_expiry,
+        now < listing.listing_expiry,
         MarketplaceError::ListingExpired
     );
+    // Direct purchase is the post-claim-window market: before the SPV exists
+    // money may only be reserved in place, and while claims run they have
+    // first call on the shares.
     require!(
-        amount > 0
-            && amount
-                <= listing
-                    .listed_share_amount
-                    .saturating_sub(listing.sold_share_amount),
+        listing.claim_deadline != 0 && now >= listing.claim_deadline,
+        MarketplaceError::DirectBuyNotOpen
+    );
+    let available = listing
+        .listed_share_amount
+        .saturating_sub(listing.sold_share_amount)
+        .saturating_sub(listing.reserved_share_amount);
+    require!(
+        amount > 0 && amount <= available,
         MarketplaceError::InvalidShareAmount
     );
     // The one-way unreserve bar: a cancelled position never buys again.
     require!(
         !ctx.accounts.position.cancelled,
         MarketplaceError::PositionCancelled
+    );
+    // A missed reservation must be released before this wallet buys.
+    require!(
+        ctx.accounts.position.reserved_share_amount == 0,
+        MarketplaceError::ReservationOutstanding
     );
     require!(
         ctx.accounts
@@ -218,20 +256,7 @@ pub fn buy_property_shares_handler(
     // payment mint. The caller caps the total, so neither a price update nor
     // a config change can charge more than they signed for.
     let mint_decimals = ctx.accounts.payment_mint.decimals;
-    let price_total = listing
-        .share_price
-        .checked_mul(amount as u64)
-        .ok_or(MarketplaceError::Overflow)?;
-    let funds = scale_to_mint(price_total, mint_decimals)?;
-    let fee = scale_to_mint(
-        bps_of(price_total, listing.investor_fee_bps)?,
-        mint_decimals,
-    )?;
-    let tax = if listing.tax_paid_by_developer {
-        0
-    } else {
-        scale_to_mint(bps_of(price_total, listing.tax_bps)?, mint_decimals)?
-    };
+    let (funds, fee, tax) = price_purchase(listing, amount, mint_decimals)?;
     let total = funds
         .checked_add(fee)
         .and_then(|t| t.checked_add(tax))
@@ -337,6 +362,11 @@ pub fn buy_property_shares_handler(
         position.listing_id = listing_id;
         position.investor = ctx.accounts.investor.key();
         position.payment_mint = ctx.accounts.payment_mint.key();
+        position.payment_account = ctx.accounts.investor_payment.key();
+        position.reserved_share_amount = 0;
+        position.reserved_funds = 0;
+        position.reserved_fee = 0;
+        position.reserved_tax = 0;
         position.cancelled = false;
         position.bump = ctx.bumps.position;
     }
