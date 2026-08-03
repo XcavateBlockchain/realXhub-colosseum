@@ -23,7 +23,7 @@ fn register_locks_deposit_and_creates_account() {
         &mut svm,
         register_lawyer_ix(&lawyer.pubkey(), 1),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
 
     let entry = lawyer_of(&svm, &lawyer.pubkey());
@@ -48,7 +48,7 @@ fn register_requires_lawyer_role() {
         &mut svm,
         register_lawyer_ix(&stranger.pubkey(), 1),
         &stranger,
-        &[&stranger],
+        &[&stranger, &sponsor()],
         "AccountNotInitialized",
     );
 }
@@ -63,7 +63,7 @@ fn register_requires_existing_region() {
         &mut svm,
         register_lawyer_ix(&lawyer.pubkey(), 2),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
         "AccountNotInitialized",
     );
 }
@@ -76,7 +76,7 @@ fn register_twice_fails() {
         &mut svm,
         register_lawyer_ix(&lawyer.pubkey(), 1),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
 
     // One registration per wallet, even for another region.
@@ -86,7 +86,7 @@ fn register_twice_fails() {
         &mut svm,
         register_lawyer_ix(&lawyer.pubkey(), 3),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
         "already in use",
     );
 }
@@ -103,7 +103,7 @@ fn register_ignores_compliance_flag() {
         &mut svm,
         register_lawyer_ix(&lawyer.pubkey(), 1),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     assert_eq!(lawyer_of(&svm, &lawyer.pubkey()).region_id, 1);
 }
@@ -116,11 +116,12 @@ fn unregister_returns_deposit_and_closes() {
         &mut svm,
         register_lawyer_ix(&lawyer.pubkey(), 1),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
 
     let before = xcav_balance(&svm, &lawyer.pubkey());
     let vault_before = vault_balance(&svm);
+    let sponsor_before = svm.get_account(&sponsor().pubkey()).unwrap().lamports;
     ok(
         &mut svm,
         unregister_lawyer_ix(&lawyer.pubkey()),
@@ -128,11 +129,14 @@ fn unregister_returns_deposit_and_closes() {
         &[&lawyer],
     );
 
+    // The deposit is the lawyer's own money; the entry's rent was fronted by
+    // the sponsor and goes back there.
     assert_eq!(
         xcav_balance(&svm, &lawyer.pubkey()) - before,
         LAWYER_DEPOSIT
     );
     assert_eq!(vault_balance(&svm), vault_before - LAWYER_DEPOSIT);
+    assert!(svm.get_account(&sponsor().pubkey()).unwrap().lamports > sponsor_before);
     assert!(svm
         .get_account(&lawyer_pda(&lawyer.pubkey()))
         .is_none_or(|a| a.data.is_empty()));
@@ -148,7 +152,7 @@ fn unregister_refunds_recorded_deposit_after_config_change() {
         &mut svm,
         register_lawyer_ix(&lawyer.pubkey(), 1),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
 
     let mut params = default_params();
@@ -181,7 +185,7 @@ fn unregister_with_active_cases_fails() {
         &mut svm,
         register_lawyer_ix(&lawyer.pubkey(), 1),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     set_active_cases(&mut svm, &lawyer.pubkey(), 1);
 
@@ -225,7 +229,7 @@ fn register_rejects_deposit_above_cap() {
         &mut svm,
         register_lawyer_ix_capped(&lawyer.pubkey(), 1, LAWYER_DEPOSIT - 1),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
         "DepositTooHigh",
     );
 }
@@ -240,7 +244,7 @@ fn unregister_works_after_role_removed() {
         &mut svm,
         register_lawyer_ix(&lawyer.pubkey(), 1),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     ok(
         &mut svm,

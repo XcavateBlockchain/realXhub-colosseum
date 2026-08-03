@@ -183,7 +183,7 @@ fn first_claim_opens_the_window() {
         &mut svm,
         claim_spv_ix(&first.pubkey(), 0, 1, COSTS),
         &first,
-        &[&first],
+        &[&first, &sponsor()],
     );
     let election = listing_of(&svm, 0).spv_election;
     assert_eq!(election.round, 1);
@@ -195,7 +195,7 @@ fn first_claim_opens_the_window() {
         &mut svm,
         claim_spv_ix(&second.pubkey(), 0, 1, COSTS),
         &second,
-        &[&second],
+        &[&second, &sponsor()],
     );
     let joined = listing_of(&svm, 0).spv_election;
     assert_eq!(joined.candidate_count, 2);
@@ -211,7 +211,7 @@ fn claim_must_name_the_current_round() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 2, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
         "WrongElectionRound",
     );
 }
@@ -226,13 +226,13 @@ fn election_elects_by_plurality() {
         &mut svm,
         claim_spv_ix(&l1.pubkey(), 0, 1, COSTS),
         &l1,
-        &[&l1],
+        &[&l1, &sponsor()],
     );
     ok(
         &mut svm,
         claim_spv_ix(&l2.pubkey(), 0, 1, COSTS),
         &l2,
-        &[&l2],
+        &[&l2, &sponsor()],
     );
     for (voter, choice, amount) in [(&a, &l1, 34), (&b, &l2, 33), (&c, &l1, 10)] {
         ok(
@@ -278,13 +278,13 @@ fn vote_locks_shares_and_revote_moves_power() {
         &mut svm,
         claim_spv_ix(&l1.pubkey(), 0, 1, COSTS),
         &l1,
-        &[&l1],
+        &[&l1, &sponsor()],
     );
     ok(
         &mut svm,
         claim_spv_ix(&l2.pubkey(), 0, 1, COSTS),
         &l2,
-        &[&l2],
+        &[&l2, &sponsor()],
     );
 
     ok(
@@ -329,7 +329,7 @@ fn quorum_miss_reopens_the_election() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     // 20 of 100 shares is under the 25% quorum, however unanimous.
     ok(
@@ -362,7 +362,7 @@ fn quorum_miss_reopens_the_election() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 2, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     assert_eq!(listing_of(&svm, 0).spv_election.round, 2);
 }
@@ -377,13 +377,13 @@ fn tied_candidates_reopen_the_election() {
         &mut svm,
         claim_spv_ix(&l1.pubkey(), 0, 1, COSTS),
         &l1,
-        &[&l1],
+        &[&l1, &sponsor()],
     );
     ok(
         &mut svm,
         claim_spv_ix(&l2.pubkey(), 0, 1, COSTS),
         &l2,
-        &[&l2],
+        &[&l2, &sponsor()],
     );
     ok(
         &mut svm,
@@ -441,7 +441,7 @@ fn vote_after_close_fails() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     warp(&mut svm, 10_001);
     fails_with(
@@ -462,7 +462,7 @@ fn vote_beyond_the_holding_fails() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     fails_with(
         &mut svm,
@@ -483,13 +483,13 @@ fn finalize_needs_the_whole_field() {
         &mut svm,
         claim_spv_ix(&l1.pubkey(), 0, 1, COSTS),
         &l1,
-        &[&l1],
+        &[&l1, &sponsor()],
     );
     ok(
         &mut svm,
         claim_spv_ix(&l2.pubkey(), 0, 1, COSTS),
         &l2,
-        &[&l2],
+        &[&l2, &sponsor()],
     );
     ok(
         &mut svm,
@@ -516,7 +516,7 @@ fn finalize_waits_for_the_close() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     let cranker = funded(&mut svm);
     fails_with(
@@ -543,7 +543,7 @@ fn vanished_winner_fails_gracefully() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     ok(
         &mut svm,
@@ -587,7 +587,7 @@ fn candidacy_rent_comes_back_after_settlement() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     let cranker = funded(&mut svm);
     fails_with(
@@ -605,14 +605,16 @@ fn candidacy_rent_comes_back_after_settlement() {
         &cranker,
         &[&cranker],
     );
-    let before = svm.get_account(&lawyer.pubkey()).unwrap().lamports;
+    // The sponsor fronted the candidacy's rent, so the close pays it back
+    // there, not to the lawyer.
+    let before = svm.get_account(&sponsor().pubkey()).unwrap().lamports;
     ok(
         &mut svm,
         close_candidacy_ix(&cranker.pubkey(), 0, 1, &lawyer.pubkey()),
         &cranker,
         &[&cranker],
     );
-    assert!(svm.get_account(&lawyer.pubkey()).unwrap().lamports > before);
+    assert!(svm.get_account(&sponsor().pubkey()).unwrap().lamports > before);
     assert!(svm
         .get_account(&candidacy_pda(0, 1, &lawyer.pubkey()))
         .is_none_or(|acc| acc.data.is_empty()));
@@ -634,7 +636,7 @@ fn one_lawyer_cannot_take_both_sides() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
         "ConflictOfInterest",
     );
 }
@@ -655,7 +657,7 @@ fn both_sides_share_one_fee_pot() {
         &mut svm,
         claim_spv_ix(&second.pubkey(), 0, 1, 1),
         &second,
-        &[&second],
+        &[&second, &sponsor()],
         "CostsExceedFees",
     );
 }
@@ -671,7 +673,7 @@ fn unlock_waits_for_the_election() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     ok(
         &mut svm,
@@ -704,7 +706,7 @@ fn voter_can_still_exit_after_legal_timeout() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     ok(
         &mut svm,
@@ -736,7 +738,7 @@ fn teardown_waits_for_the_finalizer() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     // The legal window dies with the election never settled; everyone leaves.
     warp(&mut svm, 100_001);
@@ -906,7 +908,7 @@ fn revote_rejects_a_surplus_candidacy() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     ok(
         &mut svm,
@@ -939,7 +941,7 @@ fn revote_rejects_a_surplus_candidacy() {
         &mut svm,
         claim_spv_ix(&other.pubkey(), 0, 1, COSTS),
         &other,
-        &[&other],
+        &[&other, &sponsor()],
     );
     fails_with(
         &mut svm,
@@ -977,7 +979,7 @@ fn voting_window_stops_at_the_deadline() {
         &mut svm,
         claim_spv_ix(&lawyer.pubkey(), 0, 1, COSTS),
         &lawyer,
-        &[&lawyer],
+        &[&lawyer, &sponsor()],
     );
     let listing = listing_of(&svm, 0);
     assert_eq!(listing.spv_election.expiry, listing.legal_deadline);

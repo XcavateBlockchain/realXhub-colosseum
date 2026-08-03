@@ -10,12 +10,17 @@ use xcavate_whitelist::state::{Role, RoleAccount};
 
 /// Join the lawyer registry for a region. Lawyer-role only. The region must
 /// exist (its PDA existing is the check), and the caller locks the configured
-/// XCAV deposit. One registration per wallet: `init` fails on a second call.
+/// XCAV deposit. The sponsor fronts the registry entry's rent; the deposit
+/// stays the lawyer's own stake. One registration per wallet: `init` fails
+/// on a second call.
 #[derive(Accounts)]
 #[instruction(region_id: u16)]
 pub struct RegisterLawyer<'info> {
-    #[account(mut)]
     pub lawyer: Signer<'info>,
+
+    /// The sponsor wallet fronting the registry entry's rent.
+    #[account(mut, address = config.rent_collector @ MarketplaceError::NotRentCollector)]
+    pub payer: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Box<Account<'info, Config>>,
@@ -42,7 +47,7 @@ pub struct RegisterLawyer<'info> {
 
     #[account(
         init,
-        payer = lawyer,
+        payer = payer,
         space = 8 + Lawyer::INIT_SPACE,
         seeds = [LAWYER_SEED, lawyer.key().as_ref()],
         bump,
@@ -110,21 +115,26 @@ pub fn register_lawyer_handler(
 }
 
 /// Leave the lawyer registry. Blocked while the lawyer has active cases; the
-/// deposit recorded at registration is returned. Deliberately not role-gated:
-/// this is a pure exit, and a lawyer whose role was revoked must still be able
-/// to reclaim their deposit. The registry PDA seeded by the wallet proves who
+/// deposit recorded at registration is returned, and the entry's rent goes
+/// back to the sponsor that fronted it. Deliberately not role-gated: this is
+/// a pure exit, and a lawyer whose role was revoked must still be able to
+/// reclaim their deposit. The registry PDA seeded by the wallet proves who
 /// the caller is.
 #[derive(Accounts)]
 pub struct UnregisterLawyer<'info> {
-    #[account(mut)]
     pub lawyer: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Box<Account<'info, Config>>,
 
+    /// CHECK: the sponsor wallet that fronted the entry's rent; gets it back
+    /// as the entry closes.
+    #[account(mut, address = config.rent_collector @ MarketplaceError::NotRentCollector)]
+    pub rent_collector: UncheckedAccount<'info>,
+
     #[account(
         mut,
-        close = lawyer,
+        close = rent_collector,
         seeds = [LAWYER_SEED, lawyer.key().as_ref()],
         bump = lawyer_account.bump,
         constraint = lawyer_account.active_cases == 0 @ MarketplaceError::LawyerStillActive,

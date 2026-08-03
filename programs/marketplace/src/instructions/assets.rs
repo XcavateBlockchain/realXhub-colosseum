@@ -221,8 +221,8 @@ pub fn init_property_assets_handler(
     )?;
 
     // The vault's share account, then the full supply into it. The account
-    // starts frozen like every other, so it is thawed once and stays open,
-    // since it's program-custodied.
+    // starts frozen like every other, so it is thawed once and stays open:
+    // only the program's own PDA can sign transfers out of it anyway.
     create_ata(CpiContext::new(
         ctx.accounts.associated_token_program.key(),
         CreateAta {

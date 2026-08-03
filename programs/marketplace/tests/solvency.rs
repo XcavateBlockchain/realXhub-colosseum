@@ -218,7 +218,7 @@ proptest! {
                         election.round
                     };
                     let ix = claim_spv_ix(&lawyer.pubkey(), 0, round, 1_000_000_000);
-                    let _ = process(&mut svm, ix, &lawyer, &[&lawyer]);
+                    let _ = process(&mut svm, ix, &sponsor, &[&sponsor, &lawyer]);
                 }
                 8 => {
                     // One lawyer stands in these walks, so every vote and

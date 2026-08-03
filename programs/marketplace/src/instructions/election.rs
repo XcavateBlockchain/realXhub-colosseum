@@ -329,24 +329,28 @@ pub fn finalize_spv_election_handler<'info>(
 
 /// Reclaim a candidacy's rent once its round is over (settled by the
 /// finalizer, or superseded by a later round). Permissionless; the rent goes
-/// back to the lawyer who staked the candidacy.
+/// back to the sponsor that fronted the candidacy.
 #[derive(Accounts)]
 #[instruction(listing_id: u64, round: u64, lawyer: Pubkey)]
 pub struct CloseCandidacy<'info> {
     pub cranker: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+
+    /// CHECK: the sponsor wallet that fronted the candidacy's rent; gets it
+    /// back as the candidacy closes.
+    #[account(mut, address = config.rent_collector @ MarketplaceError::NotRentCollector)]
+    pub rent_collector: UncheckedAccount<'info>,
 
     /// CHECK: the listing PDA, pinned by seeds. Unchecked because it may
     /// already be torn down; a candidacy must stay closable after that.
     #[account(seeds = [LISTING_SEED, &listing_id.to_le_bytes()], bump)]
     pub listing: UncheckedAccount<'info>,
 
-    /// CHECK: the candidate's wallet; receives the candidacy rent back.
-    #[account(mut, address = lawyer @ MarketplaceError::WrongLawyer)]
-    pub lawyer_wallet: UncheckedAccount<'info>,
-
     #[account(
         mut,
-        close = lawyer_wallet,
+        close = rent_collector,
         seeds = [
             LAWYER_CANDIDATE_SEED,
             &listing_id.to_le_bytes(),

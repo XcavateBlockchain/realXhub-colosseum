@@ -1,9 +1,11 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{LAWYER_CANDIDATE_SEED, LAWYER_SEED, LISTING_SEED, PROPERTY_SEED};
+use crate::constants::{
+    CONFIG_SEED, LAWYER_CANDIDATE_SEED, LAWYER_SEED, LISTING_SEED, PROPERTY_SEED,
+};
 use crate::error::MarketplaceError;
 use crate::state::{
-    DocumentStatus, Lawyer, LawyerCandidacy, Listing, ListingStatus, PropertyAsset,
+    Config, DocumentStatus, Lawyer, LawyerCandidacy, Listing, ListingStatus, PropertyAsset,
     MAX_SPV_CANDIDATES,
 };
 
@@ -135,13 +137,20 @@ pub fn assign_developer_lawyer_handler(
 
 /// A registered lawyer stands for election as the SPV's lawyer, naming their
 /// costs. The first candidacy opens the voting window; later ones join the
-/// same round while it runs. Lawyer-role only and compliance-gated: engaging
-/// on a live sale is where legal responsibility starts.
+/// same round while it runs. The sponsor fronts the candidacy's rent.
+/// Lawyer-role only and compliance-gated: engaging on a live sale is where
+/// legal responsibility starts.
 #[derive(Accounts)]
 #[instruction(listing_id: u64, round: u64)]
 pub struct ClaimSpvCase<'info> {
-    #[account(mut)]
     pub lawyer: Signer<'info>,
+
+    /// The sponsor wallet fronting the candidacy's rent.
+    #[account(mut, address = config.rent_collector @ MarketplaceError::NotRentCollector)]
+    pub payer: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
 
     /// The caller's Lawyer role, owned by the roles program.
     #[account(
@@ -179,7 +188,7 @@ pub struct ClaimSpvCase<'info> {
     /// The candidacy, one per lawyer per round; `init` rejects standing twice.
     #[account(
         init,
-        payer = lawyer,
+        payer = payer,
         space = 8 + LawyerCandidacy::INIT_SPACE,
         seeds = [
             LAWYER_CANDIDATE_SEED,

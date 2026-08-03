@@ -1291,6 +1291,7 @@ pub fn register_lawyer_ix_capped(lawyer: &Pubkey, region_id: u16, max_deposit: u
         .data(),
         marketplace::accounts::RegisterLawyer {
             lawyer: *lawyer,
+            payer: sponsor().pubkey(),
             config: marketplace_config(),
             lawyer_role: role_pda(lawyer, Role::Lawyer),
             region: region_pda(region_id),
@@ -1312,6 +1313,7 @@ pub fn unregister_lawyer_ix(lawyer: &Pubkey) -> Instruction {
         marketplace::accounts::UnregisterLawyer {
             lawyer: *lawyer,
             config: marketplace_config(),
+            rent_collector: sponsor().pubkey(),
             lawyer_account: lawyer_pda(lawyer),
             xcav_mint: xcav_mint(),
             lawyer_token: token_acc(lawyer),
@@ -1422,7 +1424,7 @@ pub fn new_registered_lawyer(svm: &mut LiteSVM, admin: &Keypair, region_id: u16)
         svm,
         register_lawyer_ix(&kp.pubkey(), region_id),
         &kp,
-        &[&kp],
+        &[&kp, &sponsor()],
     );
     kp
 }
@@ -1464,6 +1466,8 @@ pub fn claim_spv_ix(lawyer: &Pubkey, listing_id: u64, round: u64, costs: u64) ->
         .data(),
         marketplace::accounts::ClaimSpvCase {
             lawyer: *lawyer,
+            payer: sponsor().pubkey(),
+            config: marketplace_config(),
             lawyer_role: role_pda(lawyer, Role::Lawyer),
             registry: lawyer_pda(lawyer),
             listing: listing_pda(listing_id),
@@ -1547,8 +1551,9 @@ pub fn close_candidacy_ix(
         .data(),
         marketplace::accounts::CloseCandidacy {
             cranker: *cranker,
+            config: marketplace_config(),
+            rent_collector: sponsor().pubkey(),
             listing: listing_pda(listing_id),
-            lawyer_wallet: *lawyer,
             candidacy: candidacy_pda(listing_id, round, lawyer),
         }
         .to_account_metas(None),
