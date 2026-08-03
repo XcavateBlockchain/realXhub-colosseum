@@ -18,13 +18,24 @@ use xcavate_whitelist::state::{Role, RoleAccount};
 
 /// Rescale a value quoted at `PRICE_DECIMALS` to the payment mint's own
 /// decimals, flooring so any dust favours the investor.
-fn scale_to_mint(value: u64, mint_decimals: u8) -> Result<u64> {
+pub(crate) fn scale_to_mint(value: u64, mint_decimals: u8) -> Result<u64> {
     if mint_decimals >= PRICE_DECIMALS {
         let factor = 10u128.pow((mint_decimals - PRICE_DECIMALS) as u32);
         u64::try_from(value as u128 * factor).map_err(|_| MarketplaceError::Overflow.into())
     } else {
         let factor = 10u64.pow((PRICE_DECIMALS - mint_decimals) as u32);
         Ok(value / factor)
+    }
+}
+
+/// The inverse: mint units back to the `PRICE_DECIMALS` quote, flooring.
+pub(crate) fn scale_from_mint(value: u64, mint_decimals: u8) -> Result<u64> {
+    if mint_decimals >= PRICE_DECIMALS {
+        let factor = 10u64.pow((mint_decimals - PRICE_DECIMALS) as u32);
+        Ok(value / factor)
+    } else {
+        let factor = 10u128.pow((PRICE_DECIMALS - mint_decimals) as u32);
+        u64::try_from(value as u128 * factor).map_err(|_| MarketplaceError::Overflow.into())
     }
 }
 

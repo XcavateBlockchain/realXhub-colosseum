@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_spl::associated_token::{create_idempotent, AssociatedToken, Create as CreateAta};
 use anchor_spl::token_2022::{freeze_account, thaw_account, FreezeAccount, ThawAccount, Token2022};
 use anchor_spl::token_interface::{
     transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
@@ -9,6 +10,7 @@ use crate::constants::{
     PROPERTY_VAULT_SEED, SHARE_MINT_SEED, SHARE_SEED, VAULT_SEED,
 };
 use crate::error::MarketplaceError;
+use crate::instructions::buy::{scale_from_mint, scale_to_mint};
 use crate::state::{Config, InvestorPosition, Listing, ListingStatus, PropertyAsset, ShareHolding};
 use crate::vault::release_from_vault;
 
@@ -138,7 +140,7 @@ pub fn withdraw_expired_handler(ctx: Context<WithdrawExpired>, listing_id: u64) 
         _ => return err!(MarketplaceError::ListingNotActive),
     }
     let investor = ctx.accounts.investor.key();
-    let (amount, refund, payment_mint) = settle_dead_listing_exit(ctx, listing_id)?;
+    let (amount, refund, payment_mint) = settle_dead_listing_exit(ctx, listing_id, true)?;
 
     emit!(ExpiredSharesWithdrawn {
         listing_id,
@@ -154,16 +156,17 @@ pub fn withdraw_expired_handler(ctx: Context<WithdrawExpired>, listing_id: u64) 
 /// settled: once the deadline passes, investors take their money back the
 /// same way they would from an expired listing. The first withdrawal moves
 /// the listing to `Refunding`. This is what keeps a successful sale from
-/// ever being a trap.
+/// ever being a trap, approved documents included, in case settlement
+/// never executes.
 pub fn withdraw_legal_process_expired_handler(
     ctx: Context<WithdrawExpired>,
     listing_id: u64,
 ) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     match ctx.accounts.listing.status {
-        ListingStatus::SoldOut => {
+        ListingStatus::SoldOut | ListingStatus::Legal => {
             require!(
-                now >= ctx.accounts.listing.legal_deadline,
+                now > ctx.accounts.listing.legal_deadline,
                 MarketplaceError::LegalProcessNotExpired
             );
             ctx.accounts.listing.status = ListingStatus::Refunding;
@@ -172,7 +175,7 @@ pub fn withdraw_legal_process_expired_handler(
         _ => return err!(MarketplaceError::ListingNotActive),
     }
     let investor = ctx.accounts.investor.key();
-    let (amount, refund, payment_mint) = settle_dead_listing_exit(ctx, listing_id)?;
+    let (amount, refund, payment_mint) = settle_dead_listing_exit(ctx, listing_id, true)?;
 
     emit!(LegalTimeoutSharesWithdrawn {
         listing_id,
@@ -184,12 +187,185 @@ pub fn withdraw_legal_process_expired_handler(
     Ok(())
 }
 
-/// The shared exit body: shares back to the property vault, the full payment
-/// back to the investor, both per-investor accounts closed, the counters
-/// unwound. Callers have already validated and transitioned the status.
+/// The exit from a sale the lawyers rejected. The rejection already set the
+/// status, so there is no deadline to prove. Unlike the expiry exits, the
+/// investor fee stays behind: the review that killed the sale still gets
+/// paid from it, and `settle_cancelled_fees` distributes what is retained.
+pub fn withdraw_cancelled_handler(ctx: Context<WithdrawExpired>, listing_id: u64) -> Result<()> {
+    require!(
+        ctx.accounts.listing.status == ListingStatus::Cancelled,
+        MarketplaceError::ListingNotActive
+    );
+    let investor = ctx.accounts.investor.key();
+    let (amount, refund, payment_mint) = settle_dead_listing_exit(ctx, listing_id, false)?;
+
+    emit!(CancelledSharesWithdrawn {
+        listing_id,
+        investor,
+        amount,
+        payment_mint,
+        refunded: refund,
+    });
+    Ok(())
+}
+
+/// Distribute the fees a cancelled sale retained, one payment mint per
+/// call: the SPV lawyer collects what they are still owed and the treasury
+/// takes the rest, emptying the vault account so teardown can close it.
+/// Permissionless, and only once every refund is out, because until then
+/// the account still holds investor money.
+#[derive(Accounts)]
+#[instruction(listing_id: u64)]
+pub struct SettleCancelledFees<'info> {
+    #[account(mut)]
+    pub cranker: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+
+    #[account(
+        mut,
+        seeds = [LISTING_SEED, &listing_id.to_le_bytes()],
+        bump = listing.bump,
+    )]
+    pub listing: Box<Account<'info, Listing>>,
+
+    /// Must be on the accepted list: a stray mint would draw down the debt
+    /// with worthless units.
+    #[account(
+        constraint = config.accepted_payment_mints.contains(&payment_mint.key())
+            @ MarketplaceError::InvalidMint,
+    )]
+    pub payment_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    /// CHECK: the listing vault authority; signs the payouts.
+    #[account(seeds = [LISTING_VAULT_SEED, &listing_id.to_le_bytes()], bump)]
+    pub listing_vault: UncheckedAccount<'info>,
+
+    /// The vault account holding the retained fees for this mint.
+    #[account(
+        mut,
+        associated_token::mint = payment_mint,
+        associated_token::authority = listing_vault,
+        associated_token::token_program = payment_token_program,
+    )]
+    pub listing_payment_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// The lawyer's account for this mint; where their costs land.
+    #[account(
+        mut,
+        token::mint = payment_mint,
+        token::authority = listing.spv_costs_payee,
+    )]
+    pub lawyer_payment_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: the treasury owner key from config; authority of the ATA below.
+    #[account(address = config.treasury @ MarketplaceError::InvalidConfig)]
+    pub treasury: UncheckedAccount<'info>,
+
+    /// CHECK: the treasury's ATA for this mint, created here if it doesn't
+    /// exist yet; the ATA program verifies the derivation.
+    #[account(mut)]
+    pub treasury_payment_account: UncheckedAccount<'info>,
+
+    pub payment_token_program: Interface<'info, TokenInterface>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
+pub fn settle_cancelled_fees_handler(
+    ctx: Context<SettleCancelledFees>,
+    listing_id: u64,
+) -> Result<()> {
+    require!(
+        ctx.accounts.listing.status == ListingStatus::Cancelled,
+        MarketplaceError::ListingNotActive
+    );
+    require!(
+        ctx.accounts.listing.sold_share_amount == 0,
+        MarketplaceError::SharesOutstanding
+    );
+    let pot = ctx.accounts.listing_payment_account.amount;
+    require!(pot > 0, MarketplaceError::NothingToSettle);
+
+    // The split is computed in the quote scale the costs were named in, so
+    // the amount owed carries exactly across mints of different decimals.
+    let decimals = ctx.accounts.payment_mint.decimals;
+    let pay_quote = scale_from_mint(pot, decimals)?.min(ctx.accounts.listing.spv_costs_due);
+    let lawyer_cut = scale_to_mint(pay_quote, decimals)?;
+    ctx.accounts.listing.spv_costs_due = ctx
+        .accounts
+        .listing
+        .spv_costs_due
+        .checked_sub(pay_quote)
+        .ok_or(MarketplaceError::Overflow)?;
+
+    let id_bytes = listing_id.to_le_bytes();
+    let vault_seeds: &[&[u8]] = &[LISTING_VAULT_SEED, &id_bytes, &[ctx.bumps.listing_vault]];
+    if lawyer_cut > 0 {
+        transfer_checked(
+            CpiContext::new_with_signer(
+                ctx.accounts.payment_token_program.key(),
+                TransferChecked {
+                    from: ctx.accounts.listing_payment_account.to_account_info(),
+                    mint: ctx.accounts.payment_mint.to_account_info(),
+                    to: ctx.accounts.lawyer_payment_account.to_account_info(),
+                    authority: ctx.accounts.listing_vault.to_account_info(),
+                },
+                &[vault_seeds],
+            ),
+            lawyer_cut,
+            decimals,
+        )?;
+    }
+    let treasury_cut = pot
+        .checked_sub(lawyer_cut)
+        .ok_or(MarketplaceError::Overflow)?;
+    if treasury_cut > 0 {
+        create_idempotent(CpiContext::new(
+            ctx.accounts.associated_token_program.key(),
+            CreateAta {
+                payer: ctx.accounts.cranker.to_account_info(),
+                associated_token: ctx.accounts.treasury_payment_account.to_account_info(),
+                authority: ctx.accounts.treasury.to_account_info(),
+                mint: ctx.accounts.payment_mint.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                token_program: ctx.accounts.payment_token_program.to_account_info(),
+            },
+        ))?;
+        transfer_checked(
+            CpiContext::new_with_signer(
+                ctx.accounts.payment_token_program.key(),
+                TransferChecked {
+                    from: ctx.accounts.listing_payment_account.to_account_info(),
+                    mint: ctx.accounts.payment_mint.to_account_info(),
+                    to: ctx.accounts.treasury_payment_account.to_account_info(),
+                    authority: ctx.accounts.listing_vault.to_account_info(),
+                },
+                &[vault_seeds],
+            ),
+            treasury_cut,
+            decimals,
+        )?;
+    }
+
+    emit!(CancelledFeesSettled {
+        listing_id,
+        payment_mint: ctx.accounts.payment_mint.key(),
+        lawyer_paid: lawyer_cut,
+        treasury_paid: treasury_cut,
+    });
+    Ok(())
+}
+
+/// The shared exit body: shares back to the property vault, the payment
+/// back to the investor (with or without the fee), both per-investor
+/// accounts closed, the counters unwound. Callers have already validated
+/// and transitioned the status.
 fn settle_dead_listing_exit(
     ctx: Context<WithdrawExpired>,
     listing_id: u64,
+    include_fee: bool,
 ) -> Result<(u32, u64, Pubkey)> {
     let amount = ctx.accounts.position.share_amount;
     require!(amount > 0, MarketplaceError::NothingToUnreserve);
@@ -210,11 +386,16 @@ fn settle_dead_listing_exit(
         MarketplaceError::SharesLocked
     );
 
+    let fee = if include_fee {
+        ctx.accounts.position.paid_fee
+    } else {
+        0
+    };
     let refund = ctx
         .accounts
         .position
         .paid_funds
-        .checked_add(ctx.accounts.position.paid_fee)
+        .checked_add(fee)
         .and_then(|r| r.checked_add(ctx.accounts.position.paid_tax))
         .ok_or(MarketplaceError::Overflow)?;
 
@@ -405,6 +586,23 @@ pub struct LegalTimeoutSharesWithdrawn {
     pub amount: u32,
     pub payment_mint: Pubkey,
     pub refunded: u64,
+}
+
+#[event]
+pub struct CancelledSharesWithdrawn {
+    pub listing_id: u64,
+    pub investor: Pubkey,
+    pub amount: u32,
+    pub payment_mint: Pubkey,
+    pub refunded: u64,
+}
+
+#[event]
+pub struct CancelledFeesSettled {
+    pub listing_id: u64,
+    pub payment_mint: Pubkey,
+    pub lawyer_paid: u64,
+    pub treasury_paid: u64,
 }
 
 #[event]

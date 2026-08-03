@@ -1,10 +1,11 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token_2022::spl_token_2022::{
-    extension::StateWithExtensions, state::Account as TokenAccountState,
+    extension::StateWithExtensions, state::Account as TokenAccountState, state::Mint as MintState,
 };
 use anchor_spl::token_2022::{burn, close_account, Burn, CloseAccount, Token2022};
 use anchor_spl::token_interface::{
-    close_account as close_payment_account, CloseAccount as ClosePaymentAccount, TokenInterface,
+    close_account as close_payment_account, transfer_checked, CloseAccount as ClosePaymentAccount,
+    TokenInterface, TransferChecked,
 };
 
 use crate::constants::{
@@ -17,14 +18,17 @@ use crate::state::{Config, Listing, ListingStatus, PropertyAsset};
 /// Sweep everything a fully wound-down listing leaves behind: burn the share
 /// supply sitting in the property vault, close the mint and the vault's share
 /// account back to the developer who paid their rent, close the listing
-/// vault's emptied payment accounts back to the sponsor, and close the
-/// listing and property records themselves. Permissionless; only reachable
-/// once every deposit and refund has already been paid out, so nothing of
-/// value is left to move.
+/// vault's payment accounts back to the sponsor, and close the listing and
+/// property records themselves. Permissionless; only reachable once every
+/// deposit and refund has already been paid out. Leftover balances (donated
+/// dust, fees whose settlement the pot outlasted) sweep to the treasury, so
+/// nobody can pin the listing open with one base unit; retained fees the SPV
+/// lawyer is still owed refuse the sweep until `settle_cancelled_fees` runs.
 ///
-/// The listing vault's payment accounts ride along as remaining accounts
-/// (there is one per mint that was ever paid with, all of the same token
-/// program per call).
+/// The remaining accounts cover every accepted payment mint, in the config's
+/// order, as (vault account, mint, treasury account) triples; the full list
+/// is what stops a teardown from quietly leaving a funded account behind.
+/// Vault accounts that never existed just skip.
 #[derive(Accounts)]
 #[instruction(listing_id: u64)]
 pub struct CloseDeadListing<'info> {
@@ -102,8 +106,8 @@ pub fn close_dead_listing_handler<'info>(
         listing.spv_election.expiry == 0,
         MarketplaceError::VotingStillOngoing
     );
-    // Resigning needs the listing, and it is the only way a lawyer's case
-    // count ever falls. Closing under an engaged lawyer would pin their
+    // Resigning and the close_case crank both need the listing to clear a
+    // lawyer's case count. Closing under an engaged lawyer would pin their
     // registry deposit forever.
     require!(
         listing.developer_lawyer.lawyer == Pubkey::default()
@@ -194,23 +198,87 @@ pub fn close_dead_listing_handler<'info>(
         ))?;
     }
 
-    // The listing vault's payment accounts, one per mint ever paid with. The
-    // token program enforces they are really the vault's and the emptiness
-    // check keeps a mistake from burning value.
-    for info in ctx.remaining_accounts {
-        let state = {
-            let data = info.try_borrow_data()?;
-            StateWithExtensions::<TokenAccountState>::unpack(&data)?.base
-        };
+    // The listing vault's payment accounts, one triple per accepted mint in
+    // the config's order, every mint covered so none can be left behind
+    // holding money.
+    let mints = &ctx.accounts.config.accepted_payment_mints;
+    require!(
+        ctx.remaining_accounts.len() == mints.len() * 3,
+        MarketplaceError::InvalidConfig
+    );
+    for (expected_mint, triple) in mints.iter().zip(ctx.remaining_accounts.chunks(3)) {
+        let (vault_account, mint, treasury_account) = (&triple[0], &triple[1], &triple[2]);
+        require!(mint.key == expected_mint, MarketplaceError::InvalidMint);
+        // The mint's owner is its token program; the guard vetted it at
+        // config time. The CPIs need that program in the transaction, so it
+        // must be one of the two the instruction carries.
+        let token_program = mint.owner;
         require!(
-            state.owner == ctx.accounts.listing_vault.key(),
-            MarketplaceError::InvalidConfig
+            *token_program == ctx.accounts.share_token_program.key()
+                || *token_program == ctx.accounts.payment_token_program.key(),
+            MarketplaceError::InvalidMint
         );
-        require!(state.amount == 0, MarketplaceError::SharesOutstanding);
+        require!(
+            vault_account.key()
+                == anchor_spl::associated_token::get_associated_token_address_with_program_id(
+                    &ctx.accounts.listing_vault.key(),
+                    expected_mint,
+                    token_program,
+                ),
+            MarketplaceError::WrongVaultAccount
+        );
+        // Never paid with: the account was never created.
+        if vault_account.data_is_empty() {
+            continue;
+        }
+        let amount = {
+            let data = vault_account.try_borrow_data()?;
+            StateWithExtensions::<TokenAccountState>::unpack(&data)?
+                .base
+                .amount
+        };
+        if amount > 0 {
+            // Money still here is either dust or unsettled fees; the lawyer's
+            // share must leave through the settlement first.
+            require!(
+                ctx.accounts.listing.status != ListingStatus::Cancelled
+                    || ctx.accounts.listing.spv_costs_due == 0,
+                MarketplaceError::CostsStillDue
+            );
+            require!(
+                treasury_account.key()
+                    == anchor_spl::associated_token::get_associated_token_address_with_program_id(
+                        &ctx.accounts.config.treasury,
+                        expected_mint,
+                        token_program,
+                    ),
+                MarketplaceError::WrongVaultAccount
+            );
+            let decimals = {
+                let data = mint.try_borrow_data()?;
+                StateWithExtensions::<MintState>::unpack(&data)?
+                    .base
+                    .decimals
+            };
+            transfer_checked(
+                CpiContext::new_with_signer(
+                    *token_program,
+                    TransferChecked {
+                        from: vault_account.clone(),
+                        mint: mint.clone(),
+                        to: treasury_account.clone(),
+                        authority: ctx.accounts.listing_vault.to_account_info(),
+                    },
+                    &[listing_vault_seeds],
+                ),
+                amount,
+                decimals,
+            )?;
+        }
         close_payment_account(CpiContext::new_with_signer(
-            ctx.accounts.payment_token_program.key(),
+            *token_program,
             ClosePaymentAccount {
-                account: info.clone(),
+                account: vault_account.clone(),
                 destination: ctx.accounts.rent_collector.to_account_info(),
                 authority: ctx.accounts.listing_vault.to_account_info(),
             },

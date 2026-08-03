@@ -456,13 +456,7 @@ fn close_dead_listing_sweeps_everything() {
     let cranker = funded(&mut svm);
     ok(
         &mut svm,
-        close_dead_listing_ix(
-            &cranker.pubkey(),
-            0,
-            &developer.pubkey(),
-            true,
-            &[listing_payment_ata(0)],
-        ),
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
         &cranker,
         &[&cranker],
     );
@@ -480,6 +474,58 @@ fn close_dead_listing_sweeps_everything() {
     assert!(svm.get_account(&sponsor.pubkey()).unwrap().lamports > sponsor_before);
 }
 
+// One base unit donated to a vault account must not pin the listing open;
+// the sweep sends leftovers to the treasury instead of demanding zero.
+#[test]
+fn close_dead_listing_sweeps_donated_dust() {
+    let (mut svm, admin, _sponsor, developer) = setup_listed();
+    let (a, b, c) = sell_out_three(&mut svm, &admin);
+    warp(&mut svm, 100_001);
+    for investor in [&a, &b, &c] {
+        ok(
+            &mut svm,
+            withdraw_legal_expired_ix(&investor.pubkey(), 0),
+            investor,
+            &[investor],
+        );
+    }
+    ok(
+        &mut svm,
+        withdraw_deposit_ix(&developer.pubkey(), 0),
+        &developer,
+        &[&developer],
+    );
+
+    set_token_account_for(
+        &mut svm,
+        tgbp_mint(),
+        listing_payment_ata(0),
+        &listing_vault_pda(0),
+        5,
+    );
+    set_token_account_for(
+        &mut svm,
+        tgbp_mint(),
+        treasury_payment_ata(),
+        &treasury(),
+        0,
+    );
+    let cranker = funded(&mut svm);
+    ok(
+        &mut svm,
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
+        &cranker,
+        &[&cranker],
+    );
+    assert!(svm
+        .get_account(&listing_payment_ata(0))
+        .is_none_or(|acc| acc.data.is_empty()));
+    let treasury_acc = svm.get_account(&treasury_payment_ata()).unwrap();
+    let state: anchor_spl::token::spl_token::state::Account =
+        anchor_lang::solana_program::program_pack::Pack::unpack(&treasury_acc.data).unwrap();
+    assert_eq!(state.amount, 5);
+}
+
 #[test]
 fn close_dead_listing_requires_terminal_status() {
     let (mut svm, _admin, _sponsor, developer) = setup_listed();
@@ -489,7 +535,7 @@ fn close_dead_listing_requires_terminal_status() {
     let cranker = funded(&mut svm);
     fails_with(
         &mut svm,
-        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true, &[]),
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
         &cranker,
         &[&cranker],
         "ListingNotActive",
@@ -514,7 +560,7 @@ fn close_dead_listing_requires_deposit_withdrawn() {
     let cranker = funded(&mut svm);
     fails_with(
         &mut svm,
-        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true, &[]),
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
         &cranker,
         &[&cranker],
         "DepositStillHeld",
@@ -546,7 +592,7 @@ fn close_dead_listing_from_pending_assets() {
     let cranker = funded(&mut svm);
     ok(
         &mut svm,
-        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), false, &[]),
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), false),
         &cranker,
         &[&cranker],
     );
@@ -588,7 +634,7 @@ fn teardown_waits_for_cancelled_positions() {
     let cranker = funded(&mut svm);
     fails_with(
         &mut svm,
-        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true, &[]),
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
         &cranker,
         &[&cranker],
         "PositionsOutstanding",
@@ -603,7 +649,7 @@ fn teardown_waits_for_cancelled_positions() {
     );
     ok(
         &mut svm,
-        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true, &[]),
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
         &cranker,
         &[&cranker],
     );

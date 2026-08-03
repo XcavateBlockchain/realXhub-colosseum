@@ -129,6 +129,9 @@ pub struct LawyerAssignment {
     /// collected investor fees at settlement.
     pub costs: u64,
     pub doc_status: DocumentStatus,
+    /// Hash of the document set the verdict was passed on; zero while
+    /// pending. Both sides must rule on the same hash.
+    pub documents_hash: [u8; 32],
 }
 
 /// Most lawyers that can stand in one SPV election round. Bounds the account
@@ -211,6 +214,14 @@ pub struct Listing {
     pub developer_lawyer: LawyerAssignment,
     /// The SPV's lawyer on the sale, chosen by investor vote.
     pub spv_lawyer: LawyerAssignment,
+    /// Set when a split document verdict sends the papers back for revision.
+    /// The revised set is the last chance: a second split cancels the sale.
+    pub second_attempt: bool,
+    /// Stamped at cancellation: what the SPV lawyer is still owed from the
+    /// retained fees, and who collects it. Kept on the listing because
+    /// `close_case` clears the assignment before the fees settle.
+    pub spv_costs_due: u64,
+    pub spv_costs_payee: Pubkey,
     pub spv_election: SpvElection,
     pub status: ListingStatus,
     pub bump: u8,
@@ -228,8 +239,8 @@ impl Listing {
 }
 
 /// One lawyer standing in one SPV election round; carries their own tally.
-/// The lawyer pays the rent and takes it back with `close_candidacy` once
-/// the round is over.
+/// Whoever fronts the rent (the sponsor by default) takes it back with
+/// `close_candidacy` once the round is over.
 #[account]
 #[derive(InitSpace)]
 pub struct LawyerCandidacy {
@@ -241,6 +252,8 @@ pub struct LawyerCandidacy {
     pub costs: u64,
     /// Share-weighted votes cast for this candidate.
     pub vote_power: u32,
+    /// The wallet that fronted the account's rent; refunded at close.
+    pub rent_payer: Pubkey,
     pub bump: u8,
 }
 
@@ -257,6 +270,8 @@ pub struct LawyerVote {
     pub choice: Pubkey,
     /// The shares this vote locked and counts for.
     pub power: u32,
+    /// The wallet that fronted the record's rent; refunded at close.
+    pub rent_payer: Pubkey,
     pub bump: u8,
 }
 

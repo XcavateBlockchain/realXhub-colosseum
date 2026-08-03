@@ -1186,12 +1186,106 @@ pub fn withdraw_legal_expired_ix(investor: &Pubkey, listing_id: u64) -> Instruct
     ix
 }
 
+pub fn withdraw_cancelled_ix(investor: &Pubkey, listing_id: u64) -> Instruction {
+    let mut ix = withdraw_expired_ix(investor, listing_id);
+    ix.data = marketplace::instruction::WithdrawCancelled { listing_id }.data();
+    ix
+}
+
+pub fn treasury() -> Pubkey {
+    Pubkey::new_from_array([9u8; 32])
+}
+
+/// The treasury's associated tGBP account (classic-token derivation).
+pub fn treasury_payment_ata() -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            treasury().as_ref(),
+            TOKEN_PROGRAM_ID.as_ref(),
+            tgbp_mint().as_ref(),
+        ],
+        &anchor_spl::associated_token::ID,
+    )
+    .0
+}
+
+pub fn settle_cancelled_fees_ix(cranker: &Pubkey, listing_id: u64, lawyer: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::SettleCancelledFees { listing_id }.data(),
+        marketplace::accounts::SettleCancelledFees {
+            cranker: *cranker,
+            config: marketplace_config(),
+            listing: listing_pda(listing_id),
+            payment_mint: tgbp_mint(),
+            listing_vault: listing_vault_pda(listing_id),
+            listing_payment_account: listing_payment_ata(listing_id),
+            lawyer_payment_account: tgbp_acc(lawyer),
+            treasury: treasury(),
+            treasury_payment_account: treasury_payment_ata(),
+            payment_token_program: TOKEN_PROGRAM_ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn confirm_docs_ix(
+    lawyer: &Pubkey,
+    listing_id: u64,
+    approve: bool,
+    documents_hash: [u8; 32],
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::LawyerConfirmDocuments {
+            listing_id,
+            approve,
+            documents_hash,
+        }
+        .data(),
+        marketplace::accounts::ConfirmDocuments {
+            lawyer: *lawyer,
+            lawyer_role: role_pda(lawyer, Role::Lawyer),
+            listing: listing_pda(listing_id),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn close_case_ix(cranker: &Pubkey, listing_id: u64, lawyer: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::CloseCase {
+            listing_id,
+            lawyer: *lawyer,
+        }
+        .data(),
+        marketplace::accounts::CloseCase {
+            cranker: *cranker,
+            listing: listing_pda(listing_id),
+            registry: lawyer_pda(lawyer),
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// A vault or treasury associated account for one of the accepted payment
+/// mints (classic-token derivation, which both test mints use).
+pub fn payment_ata(owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[owner.as_ref(), TOKEN_PROGRAM_ID.as_ref(), mint.as_ref()],
+        &anchor_spl::associated_token::ID,
+    )
+    .0
+}
+
 pub fn close_dead_listing_ix(
     cranker: &Pubkey,
     listing_id: u64,
     developer: &Pubkey,
     with_mint: bool,
-    payment_atas: &[Pubkey],
 ) -> Instruction {
     let mut accounts = marketplace::accounts::CloseDeadListing {
         cranker: *cranker,
@@ -1209,15 +1303,33 @@ pub fn close_dead_listing_ix(
         payment_token_program: TOKEN_PROGRAM_ID,
     }
     .to_account_metas(None);
-    for ata in payment_atas {
-        accounts.push(anchor_lang::solana_program::instruction::AccountMeta::new(
-            *ata, false,
+    // One (vault account, mint, treasury account) triple per accepted mint,
+    // in the config's order.
+    use anchor_lang::solana_program::instruction::AccountMeta;
+    for mint in [tgbp_mint(), gbp6_mint()] {
+        accounts.push(AccountMeta::new(
+            payment_ata(&listing_vault_pda(listing_id), &mint),
+            false,
         ));
+        accounts.push(AccountMeta::new_readonly(mint, false));
+        accounts.push(AccountMeta::new(payment_ata(&treasury(), &mint), false));
     }
     Instruction::new_with_bytes(
         mid(),
         &marketplace::instruction::CloseDeadListing { listing_id }.data(),
         accounts,
+    )
+}
+
+pub fn resolve_silent_ix(cranker: &Pubkey, listing_id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::ResolveSilentVerdict { listing_id }.data(),
+        marketplace::accounts::ResolveSilentVerdict {
+            cranker: *cranker,
+            listing: listing_pda(listing_id),
+        }
+        .to_account_metas(None),
     )
 }
 
@@ -1467,7 +1579,6 @@ pub fn claim_spv_ix(lawyer: &Pubkey, listing_id: u64, round: u64, costs: u64) ->
         marketplace::accounts::ClaimSpvCase {
             lawyer: *lawyer,
             payer: sponsor().pubkey(),
-            config: marketplace_config(),
             lawyer_role: role_pda(lawyer, Role::Lawyer),
             registry: lawyer_pda(lawyer),
             listing: listing_pda(listing_id),
@@ -1495,7 +1606,6 @@ pub fn vote_spv_ix(
         marketplace::accounts::VoteOnSpvLawyer {
             voter: *voter,
             payer: sponsor().pubkey(),
-            config: marketplace_config(),
             voter_role: role_pda(voter, Role::RealEstateInvestor),
             listing: listing_pda(listing_id),
             holding: holding_pda(listing_id, voter),
@@ -1551,8 +1661,7 @@ pub fn close_candidacy_ix(
         .data(),
         marketplace::accounts::CloseCandidacy {
             cranker: *cranker,
-            config: marketplace_config(),
-            rent_collector: sponsor().pubkey(),
+            rent_payer: sponsor().pubkey(),
             listing: listing_pda(listing_id),
             candidacy: candidacy_pda(listing_id, round, lawyer),
         }
@@ -1566,8 +1675,7 @@ pub fn unlock_votes_ix(voter: &Pubkey, listing_id: u64, round: u64) -> Instructi
         &marketplace::instruction::UnlockVotingShares { listing_id, round }.data(),
         marketplace::accounts::UnlockVotingShares {
             voter: *voter,
-            config: marketplace_config(),
-            rent_collector: sponsor().pubkey(),
+            rent_payer: sponsor().pubkey(),
             listing: listing_pda(listing_id),
             holding: holding_pda(listing_id, voter),
             vote_record: lawyer_vote_pda(listing_id, round, voter),

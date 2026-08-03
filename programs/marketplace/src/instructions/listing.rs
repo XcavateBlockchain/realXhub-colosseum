@@ -194,6 +194,9 @@ pub fn list_property_handler(
     listing.deposit = deposit;
     listing.developer_lawyer = LawyerAssignment::default();
     listing.spv_lawyer = LawyerAssignment::default();
+    listing.second_attempt = false;
+    listing.spv_costs_due = 0;
+    listing.spv_costs_payee = Pubkey::default();
     listing.spv_election = SpvElection::default();
     listing.status = ListingStatus::PendingAssets;
     listing.bump = ctx.bumps.listing;

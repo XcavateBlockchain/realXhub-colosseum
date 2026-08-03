@@ -760,13 +760,7 @@ fn teardown_waits_for_the_finalizer() {
     let cranker = funded(&mut svm);
     fails_with(
         &mut svm,
-        close_dead_listing_ix(
-            &cranker.pubkey(),
-            0,
-            &developer.pubkey(),
-            true,
-            &[listing_payment_ata(0)],
-        ),
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
         &cranker,
         &[&cranker],
         "VotingStillOngoing",
@@ -779,13 +773,7 @@ fn teardown_waits_for_the_finalizer() {
     );
     ok(
         &mut svm,
-        close_dead_listing_ix(
-            &cranker.pubkey(),
-            0,
-            &developer.pubkey(),
-            true,
-            &[listing_payment_ata(0)],
-        ),
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
         &cranker,
         &[&cranker],
     );
@@ -861,13 +849,7 @@ fn teardown_waits_for_engaged_lawyers() {
     let cranker = funded(&mut svm);
     fails_with(
         &mut svm,
-        close_dead_listing_ix(
-            &cranker.pubkey(),
-            0,
-            &developer.pubkey(),
-            true,
-            &[listing_payment_ata(0)],
-        ),
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
         &cranker,
         &[&cranker],
         "LawyerStillEngaged",
@@ -880,13 +862,7 @@ fn teardown_waits_for_engaged_lawyers() {
     );
     ok(
         &mut svm,
-        close_dead_listing_ix(
-            &cranker.pubkey(),
-            0,
-            &developer.pubkey(),
-            true,
-            &[listing_payment_ata(0)],
-        ),
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
         &cranker,
         &[&cranker],
     );

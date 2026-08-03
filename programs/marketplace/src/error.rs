@@ -188,4 +188,28 @@ pub enum MarketplaceError {
     /// Backing out ends once every share is reserved.
     #[msg("The sale is locked in")]
     SaleLocked,
+    /// The sale must be dead before its lawyers are released.
+    #[msg("The case is still open")]
+    CaseStillOpen,
+    /// A verdict must name the document set it rules on.
+    #[msg("Empty documents hash")]
+    EmptyDocumentsHash,
+    /// Both verdicts must rule on the same document set.
+    #[msg("Documents hash does not match the other side's")]
+    DocumentsMismatch,
+    /// The vault account holds nothing to distribute.
+    #[msg("Nothing to settle")]
+    NothingToSettle,
+    /// The refund goes to the wallet the record names, no other.
+    #[msg("Not the wallet that fronted the rent")]
+    WrongRentPayer,
+    /// The silent side can only be defaulted in the window's final stretch.
+    #[msg("The silent side still has time to rule")]
+    VerdictWindowOpen,
+    /// Defaulting a silent side needs a standing verdict on the other one.
+    #[msg("No side has ruled yet")]
+    NoVerdictPassed,
+    /// Retained fees may not be swept while the SPV lawyer is still owed.
+    #[msg("The SPV lawyer's costs are still unpaid")]
+    CostsStillDue,
 }

@@ -1,13 +1,12 @@
 use anchor_lang::prelude::*;
 
 use crate::constants::{
-    CONFIG_SEED, LAWYER_CANDIDATE_SEED, LAWYER_SEED, LAWYER_VOTE_SEED, LISTING_SEED, PROPERTY_SEED,
-    SHARE_SEED,
+    LAWYER_CANDIDATE_SEED, LAWYER_SEED, LAWYER_VOTE_SEED, LISTING_SEED, PROPERTY_SEED, SHARE_SEED,
 };
 use crate::error::MarketplaceError;
 use crate::state::{
-    Config, DocumentStatus, Lawyer, LawyerCandidacy, LawyerVote, Listing, ListingStatus,
-    PropertyAsset, ShareHolding,
+    DocumentStatus, Lawyer, LawyerCandidacy, LawyerVote, Listing, ListingStatus, PropertyAsset,
+    ShareHolding,
 };
 
 use xcavate_whitelist::state::{Role, RoleAccount};
@@ -16,21 +15,18 @@ use xcavate_whitelist::state::{Role, RoleAccount};
 /// shares put behind it. Every vote backs a candidacy; a round that elects
 /// nobody reopens for the next one. The shares lock until
 /// `unlock_voting_shares`. Investor-role only; no compliance check, since no
-/// money moves. The sponsor `payer` fronts the vote record's rent, per the
-/// rent policy; the investor themselves never needs SOL.
+/// money moves.
 #[derive(Accounts)]
 #[instruction(listing_id: u64)]
 pub struct VoteOnSpvLawyer<'info> {
     pub voter: Signer<'info>,
 
-    /// The sponsor wallet fronting rent for the investor's accounts. Fixed to
-    /// the configured rent collector, so the wallet paying the rent is also
-    /// the one refunded when the record closes.
-    #[account(mut, address = config.rent_collector @ MarketplaceError::NotRentCollector)]
+    /// Whoever fronts the vote record's rent: the sponsor on the default
+    /// path, or any willing wallet, so one protocol key can never decide the
+    /// election by withholding its signature. The record remembers who to
+    /// refund.
+    #[account(mut)]
     pub payer: Signer<'info>,
-
-    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Box<Account<'info, Config>>,
 
     /// The caller's RealEstateInvestor role, owned by the roles program.
     #[account(
@@ -175,6 +171,11 @@ pub fn vote_on_spv_lawyer_handler(
         .checked_add(amount)
         .ok_or(MarketplaceError::Overflow)?;
 
+    // A revote leaves the recorded rent payer alone: the refund belongs to
+    // whoever funded the account, not whoever last touched it.
+    if record.rent_payer == Pubkey::default() {
+        record.rent_payer = ctx.accounts.payer.key();
+    }
     record.listing_id = listing_id;
     record.round = round;
     record.voter = ctx.accounts.voter.key();
@@ -254,7 +255,9 @@ pub fn finalize_spv_election_handler<'info>(
             candidacy.listing_id == listing_id && candidacy.round == election.round,
             MarketplaceError::CandidacyMismatch
         );
-        total += candidacy.vote_power as u64;
+        total = total
+            .checked_add(candidacy.vote_power as u64)
+            .ok_or(MarketplaceError::Overflow)?;
         match leader {
             Some((_, _, best)) if candidacy.vote_power == best => tied = true,
             Some((_, _, best)) if candidacy.vote_power > best => {
@@ -329,19 +332,16 @@ pub fn finalize_spv_election_handler<'info>(
 
 /// Reclaim a candidacy's rent once its round is over (settled by the
 /// finalizer, or superseded by a later round). Permissionless; the rent goes
-/// back to the sponsor that fronted the candidacy.
+/// back to whoever fronted the candidacy.
 #[derive(Accounts)]
 #[instruction(listing_id: u64, round: u64, lawyer: Pubkey)]
 pub struct CloseCandidacy<'info> {
     pub cranker: Signer<'info>,
 
-    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Box<Account<'info, Config>>,
-
-    /// CHECK: the sponsor wallet that fronted the candidacy's rent; gets it
-    /// back as the candidacy closes.
-    #[account(mut, address = config.rent_collector @ MarketplaceError::NotRentCollector)]
-    pub rent_collector: UncheckedAccount<'info>,
+    /// CHECK: the wallet that fronted the candidacy's rent; gets it back as
+    /// the candidacy closes.
+    #[account(mut, address = candidacy.rent_payer @ MarketplaceError::WrongRentPayer)]
+    pub rent_payer: UncheckedAccount<'info>,
 
     /// CHECK: the listing PDA, pinned by seeds. Unchecked because it may
     /// already be torn down; a candidacy must stay closable after that.
@@ -350,7 +350,7 @@ pub struct CloseCandidacy<'info> {
 
     #[account(
         mut,
-        close = rent_collector,
+        close = rent_payer,
         seeds = [
             LAWYER_CANDIDATE_SEED,
             &listing_id.to_le_bytes(),
@@ -391,20 +391,17 @@ pub fn close_candidacy_handler(
 
 /// Release the shares a vote locked, once that round can no longer use them:
 /// the election was settled or superseded, or the sale left `SoldOut`
-/// entirely. Closes the vote record, returning its rent to the sponsor that
-/// fronted it. Not role-gated: this is a pure exit.
+/// entirely. Closes the vote record, returning its rent to whoever fronted
+/// it. Not role-gated: this is a pure exit.
 #[derive(Accounts)]
 #[instruction(listing_id: u64, round: u64)]
 pub struct UnlockVotingShares<'info> {
     pub voter: Signer<'info>,
 
-    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Box<Account<'info, Config>>,
-
-    /// CHECK: the sponsor wallet that fronted the record's rent; gets it back
-    /// as the record closes.
-    #[account(mut, address = config.rent_collector @ MarketplaceError::NotRentCollector)]
-    pub rent_collector: UncheckedAccount<'info>,
+    /// CHECK: the wallet that fronted the record's rent; gets it back as the
+    /// record closes.
+    #[account(mut, address = vote_record.rent_payer @ MarketplaceError::WrongRentPayer)]
+    pub rent_payer: UncheckedAccount<'info>,
 
     #[account(
         seeds = [LISTING_SEED, &listing_id.to_le_bytes()],
@@ -421,7 +418,7 @@ pub struct UnlockVotingShares<'info> {
 
     #[account(
         mut,
-        close = rent_collector,
+        close = rent_payer,
         seeds = [
             LAWYER_VOTE_SEED,
             &listing_id.to_le_bytes(),

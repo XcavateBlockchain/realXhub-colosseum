@@ -286,7 +286,6 @@ proptest! {
                         0,
                         &developer.pubkey(),
                         true,
-                        &[listing_payment_ata(0)],
                     );
                     let _ = process(&mut svm, ix, investor, &[investor]);
                 }

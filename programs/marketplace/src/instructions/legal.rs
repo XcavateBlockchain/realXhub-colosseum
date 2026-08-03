@@ -1,11 +1,9 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{
-    CONFIG_SEED, LAWYER_CANDIDATE_SEED, LAWYER_SEED, LISTING_SEED, PROPERTY_SEED,
-};
+use crate::constants::{LAWYER_CANDIDATE_SEED, LAWYER_SEED, LISTING_SEED, PROPERTY_SEED};
 use crate::error::MarketplaceError;
 use crate::state::{
-    Config, DocumentStatus, Lawyer, LawyerCandidacy, Listing, ListingStatus, PropertyAsset,
+    DocumentStatus, Lawyer, LawyerCandidacy, Listing, ListingStatus, PropertyAsset,
     MAX_SPV_CANDIDATES,
 };
 
@@ -137,20 +135,18 @@ pub fn assign_developer_lawyer_handler(
 
 /// A registered lawyer stands for election as the SPV's lawyer, naming their
 /// costs. The first candidacy opens the voting window; later ones join the
-/// same round while it runs. The sponsor fronts the candidacy's rent.
-/// Lawyer-role only and compliance-gated: engaging on a live sale is where
-/// legal responsibility starts.
+/// same round while it runs. Lawyer-role only and compliance-gated: engaging
+/// on a live sale is where legal responsibility starts.
 #[derive(Accounts)]
 #[instruction(listing_id: u64, round: u64)]
 pub struct ClaimSpvCase<'info> {
     pub lawyer: Signer<'info>,
 
-    /// The sponsor wallet fronting the candidacy's rent.
-    #[account(mut, address = config.rent_collector @ MarketplaceError::NotRentCollector)]
+    /// Whoever fronts the candidacy's rent: the sponsor on the default path,
+    /// or any willing wallet, so one protocol key can never block a
+    /// candidacy. The record remembers who to refund.
+    #[account(mut)]
     pub payer: Signer<'info>,
-
-    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Box<Account<'info, Config>>,
 
     /// The caller's Lawyer role, owned by the roles program.
     #[account(
@@ -270,6 +266,7 @@ pub fn claim_spv_case_handler(
     candidacy.lawyer = lawyer;
     candidacy.costs = costs;
     candidacy.vote_power = 0;
+    candidacy.rent_payer = ctx.accounts.payer.key();
     candidacy.bump = ctx.bumps.candidacy;
 
     emit!(SpvCaseClaimed {
@@ -335,6 +332,257 @@ pub fn resign_from_case_handler(ctx: Context<ResignFromCase>, listing_id: u64) -
     Ok(())
 }
 
+/// A case lawyer's verdict on the sale documents, bound to the hash of the
+/// set they reviewed; verdicts only combine when the hashes agree. Both
+/// sides approving moves the sale to settlement; both rejecting cancels it
+/// and opens the refunds. A split verdict sends the documents back for
+/// revision once, every verdict resetting to pending for the new set, and
+/// cancels on the second split. Confirming binds the sale, so the caller
+/// must still hold the Lawyer role; compliance was vetted when they engaged.
+#[derive(Accounts)]
+#[instruction(listing_id: u64)]
+pub struct ConfirmDocuments<'info> {
+    pub lawyer: Signer<'info>,
+
+    /// The caller's Lawyer role, owned by the roles program.
+    #[account(
+        seeds = [
+            xcavate_whitelist::ROLE_SEED,
+            lawyer.key().as_ref(),
+            &[Role::Lawyer.seed_byte()],
+        ],
+        bump = lawyer_role.bump,
+        seeds::program = xcavate_whitelist::ID,
+    )]
+    pub lawyer_role: Box<Account<'info, RoleAccount>>,
+
+    #[account(
+        mut,
+        seeds = [LISTING_SEED, &listing_id.to_le_bytes()],
+        bump = listing.bump,
+    )]
+    pub listing: Box<Account<'info, Listing>>,
+}
+
+/// Cancellation stamps what the SPV lawyer is owed from the retained fees,
+/// and who collects it, before `close_case` can clear the assignment.
+fn cancel_sale(listing: &mut Listing) {
+    listing.status = ListingStatus::Cancelled;
+    listing.spv_costs_due = listing.spv_lawyer.costs;
+    listing.spv_costs_payee = listing.spv_lawyer.lawyer;
+}
+
+pub fn confirm_documents_handler(
+    ctx: Context<ConfirmDocuments>,
+    listing_id: u64,
+    approve: bool,
+    documents_hash: [u8; 32],
+) -> Result<()> {
+    let listing = &mut ctx.accounts.listing;
+    require!(
+        listing.status == ListingStatus::SoldOut,
+        MarketplaceError::ListingNotActive
+    );
+    // Past the deadline the timeout exit takes over; a late verdict must not
+    // beat it to the status.
+    require!(
+        Clock::get()?.unix_timestamp <= listing.legal_deadline,
+        MarketplaceError::LegalProcessExpired
+    );
+    require!(
+        documents_hash != [0u8; 32],
+        MarketplaceError::EmptyDocumentsHash
+    );
+
+    let lawyer = ctx.accounts.lawyer.key();
+    let is_developer_side = if listing.developer_lawyer.lawyer == lawyer {
+        true
+    } else if listing.spv_lawyer.lawyer == lawyer {
+        false
+    } else {
+        return err!(MarketplaceError::NotCaseLawyer);
+    };
+
+    // The verdicts only combine when they rule on the same document set, so
+    // a second verdict must name the hash the first one recorded.
+    let other = if is_developer_side {
+        &listing.spv_lawyer
+    } else {
+        &listing.developer_lawyer
+    };
+    require!(
+        other.doc_status == DocumentStatus::Pending || other.documents_hash == documents_hash,
+        MarketplaceError::DocumentsMismatch
+    );
+
+    let side = if is_developer_side {
+        &mut listing.developer_lawyer
+    } else {
+        &mut listing.spv_lawyer
+    };
+    require!(
+        side.doc_status == DocumentStatus::Pending,
+        MarketplaceError::AlreadyConfirmed
+    );
+    side.doc_status = if approve {
+        DocumentStatus::Approved
+    } else {
+        DocumentStatus::Rejected
+    };
+    side.documents_hash = documents_hash;
+
+    use DocumentStatus::{Approved, Pending, Rejected};
+    match (
+        listing.developer_lawyer.doc_status,
+        listing.spv_lawyer.doc_status,
+    ) {
+        (Approved, Approved) => listing.status = ListingStatus::Legal,
+        (Rejected, Rejected) => cancel_sale(listing),
+        (Approved, Rejected) | (Rejected, Approved) => {
+            if listing.second_attempt {
+                cancel_sale(listing);
+            } else {
+                // A revised set is expected, so the recorded hashes go too.
+                listing.developer_lawyer.doc_status = Pending;
+                listing.developer_lawyer.documents_hash = [0u8; 32];
+                listing.spv_lawyer.doc_status = Pending;
+                listing.spv_lawyer.documents_hash = [0u8; 32];
+                listing.second_attempt = true;
+            }
+        }
+        // The other side hasn't ruled yet.
+        _ => {}
+    }
+
+    emit!(DocumentsConfirmed {
+        listing_id,
+        lawyer,
+        approve,
+        documents_hash,
+        status: listing.status,
+    });
+    Ok(())
+}
+
+/// Cancel a sale whose one standing verdict the other side is sitting out.
+/// A lawyer's pay must not depend on the counterparty choosing to rule, so
+/// once the legal window enters its final fifth, anyone can default the
+/// silent side to a rejection and the sale cancels. No revision round: a
+/// silence is not a disagreement someone could revise the documents over.
+/// The SPV lawyer is only paid from the retained fees if theirs was the
+/// side that ruled.
+#[derive(Accounts)]
+#[instruction(listing_id: u64)]
+pub struct ResolveSilentVerdict<'info> {
+    pub cranker: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [LISTING_SEED, &listing_id.to_le_bytes()],
+        bump = listing.bump,
+    )]
+    pub listing: Box<Account<'info, Listing>>,
+}
+
+pub fn resolve_silent_verdict_handler(
+    ctx: Context<ResolveSilentVerdict>,
+    listing_id: u64,
+) -> Result<()> {
+    let listing = &mut ctx.accounts.listing;
+    require!(
+        listing.status == ListingStatus::SoldOut,
+        MarketplaceError::ListingNotActive
+    );
+    let now = Clock::get()?.unix_timestamp;
+    require!(
+        now <= listing.legal_deadline,
+        MarketplaceError::LegalProcessExpired
+    );
+    let final_stretch = listing
+        .legal_deadline
+        .checked_sub(listing.legal_process_time / 5)
+        .ok_or(MarketplaceError::Overflow)?;
+    require!(now >= final_stretch, MarketplaceError::VerdictWindowOpen);
+
+    let dev_ruled = listing.developer_lawyer.doc_status != DocumentStatus::Pending;
+    let spv_ruled = listing.spv_lawyer.doc_status != DocumentStatus::Pending;
+    require!(dev_ruled != spv_ruled, MarketplaceError::NoVerdictPassed);
+
+    let silent_side = if dev_ruled {
+        &mut listing.spv_lawyer
+    } else {
+        &mut listing.developer_lawyer
+    };
+    let silent_lawyer = silent_side.lawyer;
+    silent_side.doc_status = DocumentStatus::Rejected;
+    cancel_sale(listing);
+    if !spv_ruled {
+        // A silent SPV lawyer did no review; the whole pot goes to the
+        // treasury.
+        listing.spv_costs_due = 0;
+    }
+
+    emit!(SilentVerdictResolved {
+        listing_id,
+        silent_lawyer,
+    });
+    Ok(())
+}
+
+/// Release a lawyer from a sale that died: their side clears and their case
+/// count drops, so they can unregister. Permissionless, once per side:
+/// clearing the assignment is what makes a second call fail.
+#[derive(Accounts)]
+#[instruction(listing_id: u64, lawyer: Pubkey)]
+pub struct CloseCase<'info> {
+    pub cranker: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [LISTING_SEED, &listing_id.to_le_bytes()],
+        bump = listing.bump,
+    )]
+    pub listing: Box<Account<'info, Listing>>,
+
+    /// The released lawyer's registry entry.
+    #[account(
+        mut,
+        seeds = [LAWYER_SEED, lawyer.as_ref()],
+        bump = registry.bump,
+    )]
+    pub registry: Box<Account<'info, Lawyer>>,
+}
+
+pub fn close_case_handler(ctx: Context<CloseCase>, listing_id: u64, lawyer: Pubkey) -> Result<()> {
+    let listing = &mut ctx.accounts.listing;
+    require!(
+        matches!(
+            listing.status,
+            ListingStatus::Cancelled | ListingStatus::Refunding | ListingStatus::Expired
+        ),
+        MarketplaceError::CaseStillOpen
+    );
+    let side = if listing.developer_lawyer.lawyer == lawyer {
+        &mut listing.developer_lawyer
+    } else if listing.spv_lawyer.lawyer == lawyer {
+        &mut listing.spv_lawyer
+    } else {
+        return err!(MarketplaceError::NotCaseLawyer);
+    };
+    side.lawyer = Pubkey::default();
+    side.costs = 0;
+
+    ctx.accounts.registry.active_cases = ctx
+        .accounts
+        .registry
+        .active_cases
+        .checked_sub(1)
+        .ok_or(MarketplaceError::Overflow)?;
+
+    emit!(CaseClosed { listing_id, lawyer });
+    Ok(())
+}
+
 #[event]
 pub struct DeveloperLawyerAssigned {
     pub listing_id: u64,
@@ -355,4 +603,28 @@ pub struct SpvCaseClaimed {
 pub struct LawyerResigned {
     pub listing_id: u64,
     pub lawyer: Pubkey,
+}
+
+#[event]
+pub struct DocumentsConfirmed {
+    pub listing_id: u64,
+    pub lawyer: Pubkey,
+    pub approve: bool,
+    /// The document set the verdict rules on.
+    pub documents_hash: [u8; 32],
+    /// Where the verdict left the sale.
+    pub status: ListingStatus,
+}
+
+#[event]
+pub struct CaseClosed {
+    pub listing_id: u64,
+    pub lawyer: Pubkey,
+}
+
+#[event]
+pub struct SilentVerdictResolved {
+    pub listing_id: u64,
+    /// The lawyer who never ruled; default if that side was never engaged.
+    pub silent_lawyer: Pubkey,
 }

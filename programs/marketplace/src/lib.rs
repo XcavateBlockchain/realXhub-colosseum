@@ -188,6 +188,34 @@ pub mod marketplace {
         legal::resign_from_case_handler(ctx, listing_id)
     }
 
+    pub fn lawyer_confirm_documents(
+        ctx: Context<ConfirmDocuments>,
+        listing_id: u64,
+        approve: bool,
+        documents_hash: [u8; 32],
+    ) -> Result<()> {
+        legal::confirm_documents_handler(ctx, listing_id, approve, documents_hash)
+    }
+
+    pub fn close_case(ctx: Context<CloseCase>, listing_id: u64, lawyer: Pubkey) -> Result<()> {
+        legal::close_case_handler(ctx, listing_id, lawyer)
+    }
+
+    pub fn resolve_silent_verdict(
+        ctx: Context<ResolveSilentVerdict>,
+        listing_id: u64,
+    ) -> Result<()> {
+        legal::resolve_silent_verdict_handler(ctx, listing_id)
+    }
+
+    pub fn withdraw_cancelled(ctx: Context<WithdrawExpired>, listing_id: u64) -> Result<()> {
+        withdraw::withdraw_cancelled_handler(ctx, listing_id)
+    }
+
+    pub fn settle_cancelled_fees(ctx: Context<SettleCancelledFees>, listing_id: u64) -> Result<()> {
+        withdraw::settle_cancelled_fees_handler(ctx, listing_id)
+    }
+
     pub fn reserve_shares(
         ctx: Context<ReserveShares>,
         listing_id: u64,
