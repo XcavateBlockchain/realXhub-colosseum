@@ -147,6 +147,15 @@ pub fn list_property_handler(
     let listing_expiry = now
         .checked_add(ctx.accounts.region.listing_duration)
         .ok_or(MarketplaceError::Overflow)?;
+    // A developer-covered tax comes out of the sale proceeds next to the
+    // marketplace fee; together they must fit inside the price, or the
+    // settlement subtraction could never pay the developer out.
+    if tax_paid_by_developer {
+        require!(
+            ctx.accounts.region.tax_bps as u32 + config.marketplace_fee_bps as u32 <= 10_000,
+            MarketplaceError::TaxExceedsProceeds
+        );
+    }
 
     lock_to_vault(
         &ctx.accounts.token_program.to_account_info(),
@@ -195,8 +204,10 @@ pub fn list_property_handler(
     listing.developer_lawyer = LawyerAssignment::default();
     listing.spv_lawyer = LawyerAssignment::default();
     listing.second_attempt = false;
+    listing.developer_engaged = false;
     listing.spv_costs_due = 0;
     listing.spv_costs_payee = Pubkey::default();
+    listing.collected = Vec::new();
     listing.spv_election = SpvElection::default();
     listing.status = ListingStatus::PendingAssets;
     listing.bump = ctx.bumps.listing;

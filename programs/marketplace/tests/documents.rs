@@ -36,6 +36,22 @@ fn setup_engaged() -> (
     Keypair,
     Keypair,
 ) {
+    setup_sides(true)
+}
+
+/// Same, minus the developer's side when `assign_dev` is false: the sale
+/// waits on a lawyer the developer never appoints.
+#[allow(clippy::type_complexity)]
+fn setup_sides(
+    assign_dev: bool,
+) -> (
+    LiteSVM,
+    Keypair,
+    Keypair,
+    (Keypair, Keypair, Keypair),
+    Keypair,
+    Keypair,
+) {
     let (mut svm, admin, _authority) = setup();
     let operator = funded(&mut svm);
     seed_region(&mut svm, 1, &operator.pubkey());
@@ -59,12 +75,14 @@ fn setup_engaged() -> (
     acquire_many(&mut svm, &admin, &[(&a, 34), (&b, 33), (&c, 33)]);
 
     let dev_lawyer = new_registered_lawyer(&mut svm, &admin, 1);
-    ok(
-        &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &dev_lawyer.pubkey(), COSTS),
-        &developer,
-        &[&developer],
-    );
+    if assign_dev {
+        ok(
+            &mut svm,
+            assign_dev_lawyer_ix(&developer.pubkey(), 0, &dev_lawyer.pubkey()),
+            &developer,
+            &[&developer],
+        );
+    }
     let spv_lawyer = new_registered_lawyer(&mut svm, &admin, 1);
     ok(
         &mut svm,
@@ -526,4 +544,47 @@ fn approved_documents_still_drain_on_timeout() {
         &[&cranker],
     );
     assert_eq!(lawyer_of(&svm, &spv_lawyer.pubkey()).active_cases, 0);
+}
+
+// Dying through the silence crank instead of the deadline must not dodge
+// the abandonment slash: the developer still never appointed anyone.
+#[test]
+fn silent_abandonment_still_slashes_the_bond() {
+    let (mut svm, _admin, developer, (a, b, c), _dev_lawyer, spv_lawyer) = setup_sides(false);
+    ok(
+        &mut svm,
+        confirm_docs_ix(&spv_lawyer.pubkey(), 0, false, DOCS),
+        &spv_lawyer,
+        &[&spv_lawyer],
+    );
+    warp(&mut svm, 70_000);
+    let cranker = funded(&mut svm);
+    ok(
+        &mut svm,
+        resolve_silent_ix(&cranker.pubkey(), 0),
+        &cranker,
+        &[&cranker],
+    );
+    assert_eq!(listing_of(&svm, 0).status, ListingStatus::Cancelled);
+
+    ok(&mut svm, unlock_votes_ix(&a.pubkey(), 0, 1), &a, &[&a]);
+    for investor in [&a, &b, &c] {
+        ok(
+            &mut svm,
+            withdraw_cancelled_ix(&investor.pubkey(), 0),
+            investor,
+            &[investor],
+        );
+    }
+    let before = xcav_balance(&svm, &developer.pubkey());
+    ok(
+        &mut svm,
+        withdraw_deposit_ix(&developer.pubkey(), 0),
+        &developer,
+        &[&developer],
+    );
+    assert_eq!(
+        xcav_balance(&svm, &developer.pubkey()) - before,
+        LISTING_DEPOSIT - LISTING_DEPOSIT / 100
+    );
 }

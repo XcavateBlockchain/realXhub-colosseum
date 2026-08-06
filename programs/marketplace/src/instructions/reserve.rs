@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::{create_idempotent, AssociatedToken, Create as CreateAta};
+use anchor_spl::token_2022::spl_token_2022::{extension::StateWithExtensions, state::Mint as MintState};
 use anchor_spl::token_2022::{freeze_account, thaw_account, FreezeAccount, ThawAccount, Token2022};
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
@@ -164,6 +165,7 @@ pub fn reserve_shares_handler(
         amount,
         ctx.accounts.payment_mint.decimals,
     )?;
+    let tax = crate::instructions::buy::charged_tax(listing, tax);
     let total = funds
         .checked_add(fee)
         .and_then(|t| t.checked_add(tax))
@@ -294,16 +296,18 @@ pub struct ClaimShares<'info> {
     )]
     pub holding: Box<Account<'info, ShareHolding>>,
 
-    /// The mint the position reserved in.
+    /// CHECK: the mint the position reserved in, pinned by address; kept
+    /// untyped to spare `try_accounts` stack, the reserve already vetted it.
     #[account(address = position.payment_mint @ MarketplaceError::PaymentMintMismatch)]
-    pub payment_mint: Box<InterfaceAccount<'info, Mint>>,
+    pub payment_mint: UncheckedAccount<'info>,
 
-    /// The reserved payment account the money finally leaves.
+    /// CHECK: the reserved payment account the money finally leaves, pinned
+    /// by address; the token program rules on it during the transfer.
     #[account(
         mut,
         address = position.payment_account @ MarketplaceError::PaymentMintMismatch,
     )]
-    pub investor_payment: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub investor_payment: UncheckedAccount<'info>,
 
     /// The reservation being spent down.
     #[account(
@@ -335,14 +339,17 @@ pub struct ClaimShares<'info> {
     #[account(seeds = [PROPERTY_VAULT_SEED, &listing_id.to_le_bytes()], bump)]
     pub property_vault: UncheckedAccount<'info>,
 
-    /// The vault's share account the delivery is pulled from.
+    /// CHECK: the vault's share account the delivery is pulled from, pinned
+    /// to its derivation.
     #[account(
         mut,
-        associated_token::mint = share_mint,
-        associated_token::authority = property_vault,
-        associated_token::token_program = share_token_program,
+        address = anchor_spl::associated_token::get_associated_token_address_with_program_id(
+            &property_vault.key(),
+            &share_mint.key(),
+            &share_token_program.key(),
+        ) @ MarketplaceError::WrongVaultAccount,
     )]
-    pub vault_share_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub vault_share_account: UncheckedAccount<'info>,
 
     /// CHECK: the investor's associated share account; created idempotently,
     /// so the ATA program verifies the derivation.
@@ -403,6 +410,10 @@ pub fn claim_shares_handler(ctx: Context<ClaimShares>, listing_id: u64) -> Resul
             token_program: ctx.accounts.payment_token_program.to_account_info(),
         },
     ))?;
+    let mint_decimals = {
+        let data = ctx.accounts.payment_mint.try_borrow_data()?;
+        StateWithExtensions::<MintState>::unpack(&data)?.base.decimals
+    };
     // The payment itself doubles as the check that the promised money is
     // still there: the token program rejects the transfer if it is not.
     anchor_spl::token_interface::transfer_checked(
@@ -416,7 +427,7 @@ pub fn claim_shares_handler(ctx: Context<ClaimShares>, listing_id: u64) -> Resul
             },
         ),
         total,
-        ctx.accounts.payment_mint.decimals,
+        mint_decimals,
     )?;
 
     // Shares to the investor through the usual airlock.
@@ -488,6 +499,11 @@ pub fn claim_shares_handler(ctx: Context<ClaimShares>, listing_id: u64) -> Resul
     // The reserved side is now the paid side: the money sits in the vault
     // and the same numbers back the refund paths.
     let position = &mut ctx.accounts.position;
+    let (funds, fee, tax) = (
+        position.reserved_funds,
+        position.reserved_fee,
+        position.reserved_tax,
+    );
     position.reserved_share_amount = 0;
     position.share_amount = position
         .share_amount
@@ -510,6 +526,16 @@ pub fn claim_shares_handler(ctx: Context<ClaimShares>, listing_id: u64) -> Resul
     position.reserved_tax = 0;
 
     let listing = &mut ctx.accounts.listing;
+    // When the developer covers the tax the buyer wasn't charged it, but the
+    // obligation still accrues; settlement takes it out of their proceeds.
+    // Derived from the funds this claim pays, so a price update between the
+    // reservation and the claim can't skew it.
+    let tax_owed = if listing.tax_paid_by_developer {
+        crate::instructions::buy::bps_of(funds, listing.tax_bps)?
+    } else {
+        tax
+    };
+    listing.record_collected(ctx.accounts.payment_mint.key(), funds, fee, tax_owed)?;
     listing.reserved_share_amount = listing
         .reserved_share_amount
         .checked_sub(amount)

@@ -365,6 +365,11 @@ pub fn give_gbp6(svm: &mut LiteSVM, owner: &Pubkey, amount: u64) {
     set_token_account_for(svm, gbp6_mint(), gbp6_acc(owner), owner, amount);
 }
 
+pub fn gbp6_balance(svm: &LiteSVM, owner: &Pubkey) -> u64 {
+    let acc = svm.get_account(&gbp6_acc(owner)).unwrap();
+    SplAccount::unpack(&acc.data).unwrap().amount
+}
+
 pub fn xcav_balance(svm: &LiteSVM, owner: &Pubkey) -> u64 {
     let acc = svm.get_account(&token_acc(owner)).unwrap();
     SplAccount::unpack(&acc.data).unwrap().amount
@@ -601,6 +606,10 @@ pub fn accept_authority_ix(new_authority: &Pubkey) -> Instruction {
 /// regions program would leave it. Registering a lawyer only needs the account
 /// to exist, so tests skip the whole proposal/vote/claim dance.
 pub fn seed_region(svm: &mut LiteSVM, region_id: u16, owner: &Pubkey) {
+    seed_region_taxed(svm, region_id, owner, 300)
+}
+
+pub fn seed_region_taxed(svm: &mut LiteSVM, region_id: u16, owner: &Pubkey, tax_bps: u16) {
     let (address, bump) = Pubkey::find_program_address(
         &[regions::REGION_SEED, &region_id.to_le_bytes()],
         &regions::id(),
@@ -612,7 +621,7 @@ pub fn seed_region(svm: &mut LiteSVM, region_id: u16, owner: &Pubkey) {
         location_collateral: 0,
         next_owner_change: i64::MAX,
         listing_duration: 100_000,
-        tax_bps: 300,
+        tax_bps,
         location_count: 0,
         bump,
     };
@@ -1210,6 +1219,15 @@ pub fn treasury_payment_ata() -> Pubkey {
 }
 
 pub fn settle_cancelled_fees_ix(cranker: &Pubkey, listing_id: u64, lawyer: &Pubkey) -> Instruction {
+    settle_fees_ix_with_mint(cranker, listing_id, tgbp_mint(), tgbp_acc(lawyer))
+}
+
+pub fn settle_fees_ix_with_mint(
+    cranker: &Pubkey,
+    listing_id: u64,
+    mint: Pubkey,
+    lawyer_account: Pubkey,
+) -> Instruction {
     Instruction::new_with_bytes(
         mid(),
         &marketplace::instruction::SettleCancelledFees { listing_id }.data(),
@@ -1217,18 +1235,52 @@ pub fn settle_cancelled_fees_ix(cranker: &Pubkey, listing_id: u64, lawyer: &Pubk
             cranker: *cranker,
             config: marketplace_config(),
             listing: listing_pda(listing_id),
-            payment_mint: tgbp_mint(),
+            payment_mint: mint,
             listing_vault: listing_vault_pda(listing_id),
-            listing_payment_account: listing_payment_ata(listing_id),
-            lawyer_payment_account: tgbp_acc(lawyer),
+            listing_payment_account: payment_ata(&listing_vault_pda(listing_id), &mint),
+            lawyer_payment_account: lawyer_account,
             treasury: treasury(),
-            treasury_payment_account: treasury_payment_ata(),
+            treasury_payment_account: payment_ata(&treasury(), &mint),
             payment_token_program: TOKEN_PROGRAM_ID,
             associated_token_program: anchor_spl::associated_token::ID,
             system_program: SYS,
         }
         .to_account_metas(None),
     )
+}
+
+/// The dead-listing exit accounts for a position paid in `mint`; the caller
+/// picks which withdraw variant by overriding the data.
+pub fn withdraw_exit_ix_with_mint(
+    investor: &Pubkey,
+    listing_id: u64,
+    mint: Pubkey,
+    investor_account: Pubkey,
+) -> Instruction {
+    let mut ix = withdraw_expired_ix(investor, listing_id);
+    let accounts = marketplace::accounts::WithdrawExpired {
+        investor: *investor,
+        config: marketplace_config(),
+        rent_collector: sponsor().pubkey(),
+        listing: listing_pda(listing_id),
+        property: property_pda(listing_id),
+        position: position_pda(listing_id, investor),
+        holding: holding_pda(listing_id, investor),
+        payment_mint: mint,
+        investor_payment: investor_account,
+        listing_vault: listing_vault_pda(listing_id),
+        listing_payment_account: payment_ata(&listing_vault_pda(listing_id), &mint),
+        share_mint: share_mint_pda(listing_id),
+        mint_auth: mint_auth_pda(listing_id),
+        property_vault: property_vault_pda(listing_id),
+        vault_share_account: vault_share_account(listing_id),
+        investor_share_account: investor_share_ata(listing_id, investor),
+        payment_token_program: TOKEN_PROGRAM_ID,
+        share_token_program: anchor_spl::token_2022::ID,
+    }
+    .to_account_metas(None);
+    ix.accounts = accounts;
+    ix
 }
 
 pub fn confirm_docs_ix(
@@ -1321,6 +1373,61 @@ pub fn close_dead_listing_ix(
     )
 }
 
+/// One payout group per mint, in the listing's collected order. Payment
+/// accounts are the deterministic test accounts for each party.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_deal_ix(
+    cranker: &Pubkey,
+    listing_id: u64,
+    region_id: u16,
+    developer: &Pubkey,
+    dev_lawyer: &Pubkey,
+    spv_lawyer: &Pubkey,
+    region_owner: &Pubkey,
+    mints: &[Pubkey],
+) -> Instruction {
+    let mut accounts = marketplace::accounts::ExecuteDeal {
+        cranker: *cranker,
+        config: marketplace_config(),
+        listing: listing_pda(listing_id),
+        property: property_pda(listing_id),
+        region: region_pda(region_id),
+        developer_lawyer_registry: lawyer_pda(dev_lawyer),
+        spv_lawyer_registry: lawyer_pda(spv_lawyer),
+        listing_vault: listing_vault_pda(listing_id),
+        xcav_mint: xcav_mint(),
+        developer_token: token_acc(developer),
+        vault: vault(),
+        token_program: TOKEN_PROGRAM_ID,
+        payment_token_program: TOKEN_PROGRAM_ID,
+    }
+    .to_account_metas(None);
+    use anchor_lang::solana_program::instruction::AccountMeta;
+    for mint in mints {
+        let acc = |owner: &Pubkey| {
+            if *mint == gbp6_mint() {
+                gbp6_acc(owner)
+            } else {
+                tgbp_acc(owner)
+            }
+        };
+        accounts.push(AccountMeta::new_readonly(*mint, false));
+        accounts.push(AccountMeta::new(
+            payment_ata(&listing_vault_pda(listing_id), mint),
+            false,
+        ));
+        for payee in [developer, dev_lawyer, spv_lawyer, region_owner] {
+            accounts.push(AccountMeta::new(acc(payee), false));
+        }
+        accounts.push(AccountMeta::new(payment_ata(&treasury(), mint), false));
+    }
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::ExecuteDeal { listing_id }.data(),
+        accounts,
+    )
+}
+
 pub fn resolve_silent_ix(cranker: &Pubkey, listing_id: u64) -> Instruction {
     Instruction::new_with_bytes(
         mid(),
@@ -1344,6 +1451,7 @@ pub fn withdraw_deposit_ix(developer: &Pubkey, listing_id: u64) -> Instruction {
             xcav_mint: xcav_mint(),
             developer_token: token_acc(developer),
             vault: vault(),
+            treasury_token: Some(payment_ata(&treasury(), &xcav_mint())),
             token_program: TOKEN_PROGRAM_ID,
         }
         .to_account_metas(None),
@@ -1541,18 +1649,12 @@ pub fn new_registered_lawyer(svm: &mut LiteSVM, admin: &Keypair, region_id: u16)
     kp
 }
 
-pub fn assign_dev_lawyer_ix(
-    developer: &Pubkey,
-    listing_id: u64,
-    lawyer: &Pubkey,
-    costs: u64,
-) -> Instruction {
+pub fn assign_dev_lawyer_ix(developer: &Pubkey, listing_id: u64, lawyer: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         mid(),
         &marketplace::instruction::AssignDeveloperLawyer {
             listing_id,
             lawyer: *lawyer,
-            costs,
         }
         .data(),
         marketplace::accounts::AssignDeveloperLawyer {
@@ -1756,6 +1858,14 @@ pub fn setup() -> (LiteSVM, Keypair, Keypair) {
     )
     .unwrap();
     set_mint(&mut svm);
+    // The treasury's XCAV account, where the abandonment slash lands.
+    set_token_account_for(
+        &mut svm,
+        xcav_mint(),
+        payment_ata(&treasury(), &xcav_mint()),
+        &treasury(),
+        0,
+    );
 
     let authority = funded(&mut svm);
     svm.airdrop(&sponsor().pubkey(), 100_000_000_000).unwrap();

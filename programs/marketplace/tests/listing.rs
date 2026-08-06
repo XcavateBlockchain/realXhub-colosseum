@@ -4,6 +4,7 @@
 mod common;
 use common::*;
 
+use anchor_lang::InstructionData;
 use marketplace::state::ListingStatus;
 
 /// Full setup plus region 1 with the default postcode registered, and a
@@ -179,6 +180,48 @@ fn list_rejects_zero_price() {
         &[&developer],
         "InvalidSharePrice",
     );
+}
+
+#[test]
+fn list_rejects_developer_tax_that_swallows_the_price() {
+    let (mut svm, admin, _authority) = setup();
+    let operator = funded(&mut svm);
+    // 99.5% tax next to the 1% marketplace fee leaves nothing to pay the
+    // developer from, so the dev-pays-tax listing must not open.
+    seed_region_taxed(&mut svm, 1, &operator.pubkey(), 9_950);
+    seed_location(&mut svm, 1, POSTCODE);
+    let developer = new_developer(&mut svm, &admin);
+
+    let mut list = list_ix(&developer.pubkey(), 0);
+    list.data = marketplace::instruction::ListProperty {
+        region_id: 1,
+        postcode: POSTCODE.to_vec(),
+        share_price: SHARE_PRICE,
+        share_amount: SHARE_AMOUNT,
+        tax_paid_by_developer: true,
+        max_deposit: u64::MAX,
+    }
+    .data();
+    fails_with(
+        &mut svm,
+        list.clone(),
+        &developer,
+        &[&developer],
+        "TaxExceedsProceeds",
+    );
+
+    // The buyer-pays form of the same listing is fine: its tax rides on top
+    // of the price instead of coming out of it.
+    list.data = marketplace::instruction::ListProperty {
+        region_id: 1,
+        postcode: POSTCODE.to_vec(),
+        share_price: SHARE_PRICE,
+        share_amount: SHARE_AMOUNT,
+        tax_paid_by_developer: false,
+        max_deposit: u64::MAX,
+    }
+    .data();
+    ok(&mut svm, list, &developer, &[&developer]);
 }
 
 #[test]

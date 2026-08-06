@@ -54,14 +54,15 @@ fn assign_developer_lawyer_engages() {
     let lawyer = new_registered_lawyer(&mut svm, &admin, 1);
     ok(
         &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey(), COSTS),
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey()),
         &developer,
         &[&developer],
     );
 
     let listing = listing_of(&svm, 0);
     assert_eq!(listing.developer_lawyer.lawyer, lawyer.pubkey());
-    assert_eq!(listing.developer_lawyer.costs, COSTS);
+    // Their pay is a private matter; nothing is committed against the pot.
+    assert_eq!(listing.developer_lawyer.costs, 0);
     assert_eq!(lawyer_of(&svm, &lawyer.pubkey()).active_cases, 1);
     // An engaged lawyer can't walk out of the registry with a live case.
     fails_with(
@@ -89,7 +90,7 @@ fn assign_requires_a_sold_out_sale() {
     let lawyer = new_registered_lawyer(&mut svm, &admin, 1);
     fails_with(
         &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey(), COSTS),
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey()),
         &developer,
         &[&developer],
         "ListingNotActive",
@@ -104,7 +105,7 @@ fn assign_requires_the_property_region() {
     let lawyer = new_registered_lawyer(&mut svm, &admin, 2);
     fails_with(
         &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey(), COSTS),
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey()),
         &developer,
         &[&developer],
         "WrongRegion",
@@ -118,23 +119,10 @@ fn assign_requires_a_compliant_lawyer() {
     set_permission(&mut svm, &admin, &lawyer.pubkey(), Role::Lawyer, false);
     fails_with(
         &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey(), COSTS),
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey()),
         &developer,
         &[&developer],
         "NotCompliant",
-    );
-}
-
-#[test]
-fn assign_rejects_costs_above_the_fee_pot() {
-    let (mut svm, admin, developer, _investors) = setup_sold_out();
-    let lawyer = new_registered_lawyer(&mut svm, &admin, 1);
-    fails_with(
-        &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey(), FEE_POT + 1),
-        &developer,
-        &[&developer],
-        "CostsExceedFees",
     );
 }
 
@@ -145,7 +133,7 @@ fn assign_after_the_deadline_fails() {
     warp(&mut svm, 100_001);
     fails_with(
         &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey(), COSTS),
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey()),
         &developer,
         &[&developer],
         "LegalProcessExpired",
@@ -159,13 +147,13 @@ fn assign_only_once() {
     let second = new_registered_lawyer(&mut svm, &admin, 1);
     ok(
         &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &first.pubkey(), COSTS),
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &first.pubkey()),
         &developer,
         &[&developer],
     );
     fails_with(
         &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &second.pubkey(), COSTS),
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &second.pubkey()),
         &developer,
         &[&developer],
         "LawyerJobTaken",
@@ -628,7 +616,7 @@ fn one_lawyer_cannot_take_both_sides() {
     let lawyer = new_registered_lawyer(&mut svm, &admin, 1);
     ok(
         &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey(), COSTS),
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey()),
         &developer,
         &[&developer],
     );
@@ -642,23 +630,30 @@ fn one_lawyer_cannot_take_both_sides() {
 }
 
 #[test]
-fn both_sides_share_one_fee_pot() {
+fn spv_costs_are_capped_by_the_fee_pot() {
     let (mut svm, admin, developer, _investors) = setup_with_spv();
     let first = new_registered_lawyer(&mut svm, &admin, 1);
     let second = new_registered_lawyer(&mut svm, &admin, 1);
-    // The developer side takes the whole pot; the SPV side can't bid at all.
+    // The developer's side never touches the pot, so their engagement can't
+    // squeeze the SPV lawyer's budget.
     ok(
         &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &first.pubkey(), FEE_POT),
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &first.pubkey()),
         &developer,
         &[&developer],
     );
     fails_with(
         &mut svm,
-        claim_spv_ix(&second.pubkey(), 0, 1, 1),
+        claim_spv_ix(&second.pubkey(), 0, 1, FEE_POT + 1),
         &second,
         &[&second, &sponsor()],
         "CostsExceedFees",
+    );
+    ok(
+        &mut svm,
+        claim_spv_ix(&second.pubkey(), 0, 1, FEE_POT),
+        &second,
+        &[&second, &sponsor()],
     );
 }
 
@@ -792,7 +787,7 @@ fn resign_reopens_the_side() {
     let lawyer = new_registered_lawyer(&mut svm, &admin, 1);
     ok(
         &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey(), COSTS),
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey()),
         &developer,
         &[&developer],
     );
@@ -811,7 +806,7 @@ fn resign_reopens_the_side() {
     let next = new_registered_lawyer(&mut svm, &admin, 1);
     ok(
         &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &next.pubkey(), COSTS),
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &next.pubkey()),
         &developer,
         &[&developer],
     );
@@ -823,7 +818,7 @@ fn teardown_waits_for_engaged_lawyers() {
     let lawyer = new_registered_lawyer(&mut svm, &admin, 1);
     ok(
         &mut svm,
-        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey(), COSTS),
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey()),
         &developer,
         &[&developer],
     );

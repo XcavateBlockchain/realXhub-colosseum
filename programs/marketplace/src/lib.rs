@@ -138,9 +138,8 @@ pub mod marketplace {
         ctx: Context<AssignDeveloperLawyer>,
         listing_id: u64,
         lawyer: Pubkey,
-        costs: u64,
     ) -> Result<()> {
-        legal::assign_developer_lawyer_handler(ctx, listing_id, lawyer, costs)
+        legal::assign_developer_lawyer_handler(ctx, listing_id, lawyer)
     }
 
     pub fn claim_spv_case(
@@ -206,6 +205,13 @@ pub mod marketplace {
         listing_id: u64,
     ) -> Result<()> {
         legal::resolve_silent_verdict_handler(ctx, listing_id)
+    }
+
+    pub fn execute_deal<'info>(
+        ctx: Context<'info, ExecuteDeal<'info>>,
+        listing_id: u64,
+    ) -> Result<()> {
+        settlement::execute_deal_handler(ctx, listing_id)
     }
 
     pub fn withdraw_cancelled(ctx: Context<WithdrawExpired>, listing_id: u64) -> Result<()> {

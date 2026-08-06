@@ -390,7 +390,8 @@ fn legal_timeout_reopens_the_exits() {
     assert_eq!(listing_of(&svm, 0).sold_share_amount, 0);
     assert_eq!(property_of(&svm, 0).holder_count, 0);
 
-    // The developer's deposit follows once everyone is out.
+    // The developer's deposit follows once everyone is out, minus the 1%
+    // abandonment slash: no lawyer was ever appointed here.
     let dev_before = xcav_balance(&svm, &developer.pubkey());
     ok(
         &mut svm,
@@ -400,7 +401,7 @@ fn legal_timeout_reopens_the_exits() {
     );
     assert_eq!(
         xcav_balance(&svm, &developer.pubkey()) - dev_before,
-        LISTING_DEPOSIT
+        LISTING_DEPOSIT - LISTING_DEPOSIT / 100
     );
     assert_eq!(listing_of(&svm, 0).status, ListingStatus::Refunding);
 }
@@ -472,6 +473,100 @@ fn close_dead_listing_sweeps_everything() {
     }
     assert!(svm.get_account(&developer.pubkey()).unwrap().lamports > dev_before);
     assert!(svm.get_account(&sponsor.pubkey()).unwrap().lamports > sponsor_before);
+}
+
+fn treasury_xcav_balance(svm: &LiteSVM) -> u64 {
+    let acc = svm
+        .get_account(&payment_ata(&treasury(), &xcav_mint()))
+        .unwrap();
+    let state: anchor_spl::token::spl_token::state::Account =
+        anchor_lang::solana_program::program_pack::Pack::unpack(&acc.data).unwrap();
+    state.amount
+}
+
+// A developer who never appoints their lawyer and lets the legal window die
+// pays 1% of the bond to the treasury.
+#[test]
+fn abandoned_sale_slashes_the_bond() {
+    let (mut svm, admin, _sponsor, developer) = setup_listed();
+    let (a, b, c) = sell_out_three(&mut svm, &admin);
+    warp(&mut svm, 100_001);
+    for investor in [&a, &b, &c] {
+        ok(
+            &mut svm,
+            withdraw_legal_expired_ix(&investor.pubkey(), 0),
+            investor,
+            &[investor],
+        );
+    }
+
+    let before = xcav_balance(&svm, &developer.pubkey());
+    ok(
+        &mut svm,
+        withdraw_deposit_ix(&developer.pubkey(), 0),
+        &developer,
+        &[&developer],
+    );
+    let slash = LISTING_DEPOSIT / 100;
+    assert_eq!(
+        xcav_balance(&svm, &developer.pubkey()) - before,
+        LISTING_DEPOSIT - slash
+    );
+    assert_eq!(treasury_xcav_balance(&svm), slash);
+
+    // The slashed listing still tears down.
+    let cranker = funded(&mut svm);
+    ok(
+        &mut svm,
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
+        &cranker,
+        &[&cranker],
+    );
+}
+
+// The slash keys off whether the developer ever engaged counsel, not off the
+// slot still being filled: freeing the lawyer from the dead sale first must
+// not turn a timeout into an abandonment.
+#[test]
+fn engaged_developer_keeps_the_full_bond() {
+    let (mut svm, admin, _sponsor, developer) = setup_listed();
+    let (a, b, c) = sell_out_three(&mut svm, &admin);
+    let lawyer = new_registered_lawyer(&mut svm, &admin, 1);
+    ok(
+        &mut svm,
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &lawyer.pubkey()),
+        &developer,
+        &[&developer],
+    );
+    warp(&mut svm, 100_001);
+    for investor in [&a, &b, &c] {
+        ok(
+            &mut svm,
+            withdraw_legal_expired_ix(&investor.pubkey(), 0),
+            investor,
+            &[investor],
+        );
+    }
+    let cranker = funded(&mut svm);
+    ok(
+        &mut svm,
+        close_case_ix(&cranker.pubkey(), 0, &lawyer.pubkey()),
+        &cranker,
+        &[&cranker],
+    );
+
+    let before = xcav_balance(&svm, &developer.pubkey());
+    ok(
+        &mut svm,
+        withdraw_deposit_ix(&developer.pubkey(), 0),
+        &developer,
+        &[&developer],
+    );
+    assert_eq!(
+        xcav_balance(&svm, &developer.pubkey()) - before,
+        LISTING_DEPOSIT
+    );
+    assert_eq!(treasury_xcav_balance(&svm), 0);
 }
 
 // One base unit donated to a vault account must not pin the listing open;

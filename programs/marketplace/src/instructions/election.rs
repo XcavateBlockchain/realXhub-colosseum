@@ -279,8 +279,7 @@ pub fn finalize_spv_election_handler<'info>(
         && top_power > 0
         && now <= listing.legal_deadline
         && winner != listing.developer_lawyer.lawyer
-        && winner_costs.saturating_add(listing.developer_lawyer.costs)
-            <= listing.total_fee_quote()?
+        && winner_costs <= listing.total_fee_quote()?
     {
         // The win only sticks if the engagement checks still hold; a
         // vanished or conflicted winner fails the election instead of

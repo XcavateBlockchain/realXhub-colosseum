@@ -212,4 +212,14 @@ pub enum MarketplaceError {
     /// Retained fees may not be swept while the SPV lawyer is still owed.
     #[msg("The SPV lawyer's costs are still unpaid")]
     CostsStillDue,
+    /// The listing's collected-totals list is full.
+    #[msg("Too many payment mints on this listing")]
+    TooManyMints,
+    /// A settlement payout account must belong to the party being paid.
+    #[msg("Payout account not owned by the payee")]
+    WrongPayee,
+    /// A developer-covered tax plus the marketplace fee must leave the
+    /// developer something to be paid from.
+    #[msg("Tax and marketplace fee together exceed the sale proceeds")]
+    TaxExceedsProceeds,
 }

@@ -39,7 +39,7 @@ pub(crate) fn scale_from_mint(value: u64, mint_decimals: u8) -> Result<u64> {
     }
 }
 
-fn bps_of(value: u64, bps: u16) -> Result<u64> {
+pub(crate) fn bps_of(value: u64, bps: u16) -> Result<u64> {
     u64::try_from(value as u128 * bps as u128 / 10_000)
         .map_err(|_| MarketplaceError::Overflow.into())
 }
@@ -60,12 +60,19 @@ pub(crate) fn price_purchase(
         bps_of(price_total, listing.investor_fee_bps)?,
         mint_decimals,
     )?;
-    let tax = if listing.tax_paid_by_developer {
+    // The tax is always part of the price: it becomes the buyer's surcharge
+    // or the developer's obligation, depending on who covers it.
+    let tax = scale_to_mint(bps_of(price_total, listing.tax_bps)?, mint_decimals)?;
+    Ok((funds, fee, tax))
+}
+
+/// What the buyer is actually charged of the tax.
+pub(crate) fn charged_tax(listing: &Listing, tax: u64) -> u64 {
+    if listing.tax_paid_by_developer {
         0
     } else {
-        scale_to_mint(bps_of(price_total, listing.tax_bps)?, mint_decimals)?
-    };
-    Ok((funds, fee, tax))
+        tax
+    }
 }
 
 /// Buy shares directly, the post-claim-window market: once the window has
@@ -268,9 +275,10 @@ pub fn buy_property_shares_handler(
     // a config change can charge more than they signed for.
     let mint_decimals = ctx.accounts.payment_mint.decimals;
     let (funds, fee, tax) = price_purchase(listing, amount, mint_decimals)?;
+    let buyer_tax = charged_tax(listing, tax);
     let total = funds
         .checked_add(fee)
-        .and_then(|t| t.checked_add(tax))
+        .and_then(|t| t.checked_add(buyer_tax))
         .ok_or(MarketplaceError::Overflow)?;
     require!(total <= max_total_cost, MarketplaceError::CostTooHigh);
 
@@ -395,10 +403,11 @@ pub fn buy_property_shares_handler(
         .ok_or(MarketplaceError::Overflow)?;
     position.paid_tax = position
         .paid_tax
-        .checked_add(tax)
+        .checked_add(buyer_tax)
         .ok_or(MarketplaceError::Overflow)?;
 
     let listing = &mut ctx.accounts.listing;
+    listing.record_collected(ctx.accounts.payment_mint.key(), funds, fee, tax)?;
     if !position_exists {
         listing.position_count = listing
             .position_count
@@ -427,7 +436,7 @@ pub fn buy_property_shares_handler(
         payment_mint: ctx.accounts.payment_mint.key(),
         paid_funds: funds,
         paid_fee: fee,
-        paid_tax: tax,
+        paid_tax: buyer_tax,
         sold_out: ctx.accounts.listing.status == ListingStatus::SoldOut,
     });
     Ok(())

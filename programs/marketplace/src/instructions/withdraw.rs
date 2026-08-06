@@ -472,8 +472,10 @@ fn settle_dead_listing_exit(
 
 /// Give the developer their XCAV deposit back once the listing is dead with
 /// no shares in investor hands: abandoned before the assets ever existed, or
-/// expired with nothing sold (or everything withdrawn). Developer-only, and
-/// deliberately not role-gated: exits never are.
+/// expired with nothing sold (or everything withdrawn). A sold-out sale the
+/// developer let time out without ever appointing their lawyer costs them 1%
+/// of the bond, paid to the treasury. Developer-only, and deliberately not
+/// role-gated: exits never are.
 #[derive(Accounts)]
 #[instruction(listing_id: u64)]
 pub struct WithdrawDepositUnsold<'info> {
@@ -512,6 +514,11 @@ pub struct WithdrawDepositUnsold<'info> {
     )]
     pub vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
+    /// CHECK: the treasury's XCAV account the slash lands in; only needed
+    /// when one applies, and pinned to the derivation then.
+    #[account(mut)]
+    pub treasury_token: Option<UncheckedAccount<'info>>,
+
     pub token_program: Interface<'info, TokenInterface>,
 }
 
@@ -542,6 +549,44 @@ pub fn withdraw_deposit_unsold_handler(
     let deposit = ctx.accounts.listing.deposit;
     require!(deposit > 0, MarketplaceError::DepositAlreadyWithdrawn);
 
+    // Letting a sold-out sale die without ever appointing a lawyer costs 1%
+    // of the bond, whether it ran into the deadline or the silence crank
+    // cancelled it; investors had their money locked for nothing either way.
+    let slash = if matches!(
+        ctx.accounts.listing.status,
+        ListingStatus::Refunding | ListingStatus::Cancelled
+    ) && !ctx.accounts.listing.developer_engaged
+    {
+        deposit / 100
+    } else {
+        0
+    };
+    if slash > 0 {
+        let treasury_token = ctx
+            .accounts
+            .treasury_token
+            .as_ref()
+            .ok_or(MarketplaceError::InvalidConfig)?;
+        require!(
+            treasury_token.key()
+                == anchor_spl::associated_token::get_associated_token_address_with_program_id(
+                    &ctx.accounts.config.treasury,
+                    &ctx.accounts.xcav_mint.key(),
+                    &ctx.accounts.token_program.key(),
+                ),
+            MarketplaceError::WrongVaultAccount
+        );
+        release_from_vault(
+            &ctx.accounts.token_program.to_account_info(),
+            &ctx.accounts.vault.to_account_info(),
+            &ctx.accounts.xcav_mint.to_account_info(),
+            &treasury_token.to_account_info(),
+            &ctx.accounts.config.to_account_info(),
+            ctx.accounts.config.bump,
+            slash,
+            ctx.accounts.xcav_mint.decimals,
+        )?;
+    }
     release_from_vault(
         &ctx.accounts.token_program.to_account_info(),
         &ctx.accounts.vault.to_account_info(),
@@ -549,7 +594,9 @@ pub fn withdraw_deposit_unsold_handler(
         &ctx.accounts.developer_token.to_account_info(),
         &ctx.accounts.config.to_account_info(),
         ctx.accounts.config.bump,
-        deposit,
+        deposit
+            .checked_sub(slash)
+            .ok_or(MarketplaceError::Overflow)?,
         ctx.accounts.xcav_mint.decimals,
     )?;
 
@@ -566,6 +613,7 @@ pub fn withdraw_deposit_unsold_handler(
         listing_id,
         developer: ctx.accounts.developer.key(),
         deposit,
+        slashed: slash,
     });
     Ok(())
 }
@@ -610,4 +658,6 @@ pub struct ListingDepositWithdrawn {
     pub listing_id: u64,
     pub developer: Pubkey,
     pub deposit: u64,
+    /// The abandonment slash the treasury kept, if one applied.
+    pub slashed: u64,
 }

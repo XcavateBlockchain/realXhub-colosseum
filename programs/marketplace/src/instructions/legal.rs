@@ -33,9 +33,10 @@ fn check_engagement_open(
 
 /// The developer engages their own lawyer directly by address. The named
 /// wallet must hold a compliant Lawyer role and a registry entry in the
-/// property's region; costs come out of the shared fee pot, so they are
-/// capped by what the SPV side hasn't committed. Developer-role only, and
-/// only the listing's own developer.
+/// property's region. Their pay is the developer's own private arrangement,
+/// off chain; the only money that ever reaches them here is the tax they
+/// remit when the developer covers it. Developer-role only, and only the
+/// listing's own developer.
 #[derive(Accounts)]
 #[instruction(listing_id: u64, lawyer: Pubkey)]
 pub struct AssignDeveloperLawyer<'info> {
@@ -94,7 +95,6 @@ pub fn assign_developer_lawyer_handler(
     ctx: Context<AssignDeveloperLawyer>,
     listing_id: u64,
     lawyer: Pubkey,
-    costs: u64,
 ) -> Result<()> {
     let listing = &ctx.accounts.listing;
     check_engagement_open(listing, &ctx.accounts.property, &ctx.accounts.registry)?;
@@ -107,12 +107,6 @@ pub fn assign_developer_lawyer_handler(
         lawyer != listing.spv_lawyer.lawyer,
         MarketplaceError::ConflictOfInterest
     );
-    // Both sides are paid from the same fee pot, so the check is against
-    // what the other side has already committed, not the whole pot.
-    require!(
-        costs.saturating_add(listing.spv_lawyer.costs) <= listing.total_fee_quote()?,
-        MarketplaceError::CostsExceedFees
-    );
 
     ctx.accounts.registry.active_cases = ctx
         .accounts
@@ -122,14 +116,10 @@ pub fn assign_developer_lawyer_handler(
         .ok_or(MarketplaceError::Overflow)?;
     let listing = &mut ctx.accounts.listing;
     listing.developer_lawyer.lawyer = lawyer;
-    listing.developer_lawyer.costs = costs;
     listing.developer_lawyer.doc_status = DocumentStatus::Pending;
+    listing.developer_engaged = true;
 
-    emit!(DeveloperLawyerAssigned {
-        listing_id,
-        lawyer,
-        costs,
-    });
+    emit!(DeveloperLawyerAssigned { listing_id, lawyer });
     Ok(())
 }
 
@@ -220,8 +210,10 @@ pub fn claim_spv_case_handler(
         lawyer != listing.developer_lawyer.lawyer,
         MarketplaceError::ConflictOfInterest
     );
+    // The SPV lawyer is the only one the fee pot pays; the developer's own
+    // lawyer is a private arrangement.
     require!(
-        costs.saturating_add(listing.developer_lawyer.costs) <= listing.total_fee_quote()?,
+        costs <= listing.total_fee_quote()?,
         MarketplaceError::CostsExceedFees
     );
 
@@ -587,7 +579,6 @@ pub fn close_case_handler(ctx: Context<CloseCase>, listing_id: u64, lawyer: Pubk
 pub struct DeveloperLawyerAssigned {
     pub listing_id: u64,
     pub lawyer: Pubkey,
-    pub costs: u64,
 }
 
 #[event]

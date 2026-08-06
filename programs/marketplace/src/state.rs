@@ -125,8 +125,9 @@ pub enum DocumentStatus {
 pub struct LawyerAssignment {
     /// The lawyer on this side; default until one is engaged.
     pub lawyer: Pubkey,
-    /// What they charge, quoted at `PRICE_DECIMALS`, paid out of the
-    /// collected investor fees at settlement.
+    /// What they charge, quoted at `PRICE_DECIMALS`. Only the SPV side is
+    /// paid from the collected fees; the developer's lawyer is a private
+    /// arrangement, so their side stays zero.
     pub costs: u64,
     pub doc_status: DocumentStatus,
     /// Hash of the document set the verdict was passed on; zero while
@@ -217,11 +218,19 @@ pub struct Listing {
     /// Set when a split document verdict sends the papers back for revision.
     /// The revised set is the last chance: a second split cancels the sale.
     pub second_attempt: bool,
+    /// Whether the developer ever appointed their lawyer. Sticky: a sale that
+    /// times out without this costs the developer 1% of the bond, but a
+    /// lawyer resigning later doesn't.
+    pub developer_engaged: bool,
     /// Stamped at cancellation: what the SPV lawyer is still owed from the
     /// retained fees, and who collects it. Kept on the listing because
     /// `close_case` clears the assignment before the fees settle.
     pub spv_costs_due: u64,
     pub spv_costs_payee: Pubkey,
+    /// What each payment mint collected across the sale, split the way
+    /// settlement pays it out. Written by every claim and direct buy.
+    #[max_len(MAX_PAYMENT_MINTS)]
+    pub collected: Vec<CollectedPerMint>,
     pub spv_election: SpvElection,
     pub status: ListingStatus,
     pub bump: u8,
@@ -236,6 +245,49 @@ impl Listing {
         u64::try_from(gross * self.investor_fee_bps as u128 / 10_000)
             .map_err(|_| crate::error::MarketplaceError::Overflow.into())
     }
+
+    /// Add one payment's components to its mint's collected totals.
+    pub fn record_collected(&mut self, mint: Pubkey, funds: u64, fee: u64, tax: u64) -> Result<()> {
+        use crate::error::MarketplaceError;
+        let entry = match self.collected.iter_mut().find(|c| c.mint == mint) {
+            Some(entry) => entry,
+            None => {
+                require!(
+                    self.collected.len() < MAX_PAYMENT_MINTS,
+                    MarketplaceError::TooManyMints
+                );
+                self.collected.push(CollectedPerMint {
+                    mint,
+                    ..Default::default()
+                });
+                self.collected.last_mut().unwrap()
+            }
+        };
+        entry.funds = entry
+            .funds
+            .checked_add(funds)
+            .ok_or(MarketplaceError::Overflow)?;
+        entry.fee = entry
+            .fee
+            .checked_add(fee)
+            .ok_or(MarketplaceError::Overflow)?;
+        entry.tax = entry
+            .tax
+            .checked_add(tax)
+            .ok_or(MarketplaceError::Overflow)?;
+        Ok(())
+    }
+}
+
+/// One payment mint's totals across the primary sale, in that mint's units.
+#[derive(
+    AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, PartialEq, Eq, Debug, Default,
+)]
+pub struct CollectedPerMint {
+    pub mint: Pubkey,
+    pub funds: u64,
+    pub fee: u64,
+    pub tax: u64,
 }
 
 /// One lawyer standing in one SPV election round; carries their own tally.
