@@ -9,6 +9,7 @@ skip-lint = false
 marketplace = "B6YRVAmjmhN28smZxNfCnuKc19CamBbAEMXsp5KTfWog"
 xcavate-whitelist = "2vVARM46pPD4rcHdbXHnYA4vTGN14q6skQAzsQWcHUxn"
 regions = "FYysH5v23qtz4gK4H1yLDHneFwx6PSAT7oQwHcuRyRh"
+property = "8f4NHc1wGBM1BAufDFd9dNechLW8pxmStSfxfuJfDzob"
 
 [provider]
 cluster = "localnet"
