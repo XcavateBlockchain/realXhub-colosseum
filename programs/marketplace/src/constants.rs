@@ -41,3 +41,9 @@ pub const LAWYER_CANDIDATE_SEED: &[u8] = b"lawyer-candidate";
 
 #[constant]
 pub const RESERVATION_SEED: &[u8] = b"reservation";
+
+#[constant]
+pub const CPI_AUTH_SEED: &[u8] = b"cpi-auth";
+
+/// The property program, the only caller allowed on the share-lock surface.
+pub const PROPERTY_PROGRAM: Pubkey = pubkey!("8f4NHc1wGBM1BAufDFd9dNechLW8pxmStSfxfuJfDzob");

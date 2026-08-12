@@ -13,7 +13,11 @@ pub use anchor_lang::prelude::Pubkey;
 pub use anchor_lang::solana_program::clock::Clock;
 pub use anchor_lang::AccountDeserialize;
 pub use litesvm::LiteSVM;
-pub use property::state::{Config as PropertyConfig, LettingAgent};
+pub use marketplace::state::{PropertyAsset, ShareHolding};
+pub use property::state::{
+    AgentCandidacy, AgentVote, Config as PropertyConfig, LettingAgent, PropertyLetting,
+    ResignationNotice,
+};
 pub use solana_keypair::Keypair;
 pub use solana_signer::Signer;
 pub use xcavate_whitelist::state::Role;
@@ -26,8 +30,12 @@ use anchor_lang::{InstructionData, ToAccountMetas};
 use anchor_spl::token::spl_token::state::{Account as SplAccount, AccountState, Mint as SplMint};
 use anchor_spl::token::ID as TOKEN_PROGRAM_ID;
 use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};
+use anchor_lang::solana_program::instruction::AccountMeta;
 use property::instructions::ConfigParams;
-use property::{AGENT_SEED, CONFIG_SEED, VAULT_SEED};
+use property::{
+    AGENT_CANDIDATE_SEED, AGENT_SEED, AGENT_VOTE_SEED, CONFIG_SEED, CPI_AUTH_SEED, LETTING_SEED,
+    RESIGNATION_SEED, VAULT_SEED,
+};
 use solana_account::Account;
 use solana_message::{Message, VersionedMessage};
 use solana_transaction::versioned::VersionedTransaction;
@@ -38,6 +46,10 @@ pub const FUND_XCAV: u64 = 100_000_000_000;
 pub const AGENT_DEPOSIT: u64 = 200_000_000;
 pub const POSTCODE: &[u8] = b"SW1A1AA";
 pub const POSTCODE_B: &[u8] = b"E20 2ST";
+pub const VOTING_TIME: i64 = 3_600;
+pub const QUORUM_BPS: u16 = 2_500;
+pub const NOTICE_PERIOD: i64 = 86_400;
+pub const SHARE_SUPPLY: u32 = 100;
 
 // --- ids / PDAs ---
 
@@ -79,6 +91,61 @@ pub fn location_pda(region_id: u16, postcode: &[u8]) -> Pubkey {
     Pubkey::find_program_address(
         &[regions::LOCATION_SEED, &region_id.to_le_bytes(), postcode],
         &regions::id(),
+    )
+    .0
+}
+
+pub fn mid() -> Pubkey {
+    marketplace::id()
+}
+pub fn letting_pda(asset_id: u64) -> Pubkey {
+    Pubkey::find_program_address(&[LETTING_SEED, &asset_id.to_le_bytes()], &pid()).0
+}
+pub fn candidacy_pda(asset_id: u64, round: u64, agent: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            AGENT_CANDIDATE_SEED,
+            &asset_id.to_le_bytes(),
+            &round.to_le_bytes(),
+            agent.as_ref(),
+        ],
+        &pid(),
+    )
+    .0
+}
+pub fn agent_vote_pda(asset_id: u64, round: u64, voter: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            AGENT_VOTE_SEED,
+            &asset_id.to_le_bytes(),
+            &round.to_le_bytes(),
+            voter.as_ref(),
+        ],
+        &pid(),
+    )
+    .0
+}
+pub fn resignation_pda(asset_id: u64) -> Pubkey {
+    Pubkey::find_program_address(&[RESIGNATION_SEED, &asset_id.to_le_bytes()], &pid()).0
+}
+pub fn cpi_auth() -> Pubkey {
+    Pubkey::find_program_address(&[CPI_AUTH_SEED], &pid()).0
+}
+pub fn mkt_property_pda(asset_id: u64) -> Pubkey {
+    Pubkey::find_program_address(
+        &[marketplace::PROPERTY_SEED, &asset_id.to_le_bytes()],
+        &mid(),
+    )
+    .0
+}
+pub fn holding_pda(asset_id: u64, owner: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            marketplace::SHARE_SEED,
+            &asset_id.to_le_bytes(),
+            owner.as_ref(),
+        ],
+        &mid(),
     )
     .0
 }
@@ -336,6 +403,85 @@ pub fn seed_location(svm: &mut LiteSVM, region_id: u16, postcode: &[u8]) {
     .unwrap();
 }
 
+// --- marketplace account seeding ---
+
+/// Write a finalized `PropertyAsset` at its canonical marketplace PDA. The
+/// election only reads it, so tests skip the whole primary-sale lifecycle.
+pub fn seed_property_asset(svm: &mut LiteSVM, asset_id: u64, region_id: u16, postcode: &[u8]) {
+    let (address, bump) = Pubkey::find_program_address(
+        &[marketplace::PROPERTY_SEED, &asset_id.to_le_bytes()],
+        &mid(),
+    );
+    let property = PropertyAsset {
+        asset_id,
+        core_asset: Pubkey::new_unique(),
+        share_mint: Pubkey::new_unique(),
+        region_id,
+        location: postcode.to_vec(),
+        share_amount: SHARE_SUPPLY,
+        spv_created: true,
+        finalized: true,
+        holder_count: 3,
+        bump,
+    };
+    let mut data = PropertyAsset::DISCRIMINATOR.to_vec();
+    property.serialize(&mut data).unwrap();
+    svm.set_account(
+        address,
+        Account {
+            lamports: 100_000_000,
+            data,
+            owner: mid(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
+
+/// Mark the seeded property as not (or again) finalized.
+pub fn set_property_finalized(svm: &mut LiteSVM, asset_id: u64, finalized: bool) {
+    let address = mkt_property_pda(asset_id);
+    let acc = svm.get_account(&address).unwrap();
+    let mut property = PropertyAsset::try_deserialize(&mut acc.data.as_slice()).unwrap();
+    property.finalized = finalized;
+    let mut data = PropertyAsset::DISCRIMINATOR.to_vec();
+    property.serialize(&mut data).unwrap();
+    svm.set_account(address, Account { data, ..acc }).unwrap();
+}
+
+/// Write a holder's `ShareHolding` at its canonical marketplace PDA.
+pub fn seed_holding(svm: &mut LiteSVM, asset_id: u64, owner: &Pubkey, amount: u32) {
+    let (address, bump) = Pubkey::find_program_address(
+        &[
+            marketplace::SHARE_SEED,
+            &asset_id.to_le_bytes(),
+            owner.as_ref(),
+        ],
+        &mid(),
+    );
+    let holding = ShareHolding {
+        asset_id,
+        owner: *owner,
+        amount,
+        locked_amount: 0,
+        bump,
+    };
+    let mut data = ShareHolding::DISCRIMINATOR.to_vec();
+    holding.serialize(&mut data).unwrap();
+    svm.set_account(
+        address,
+        Account {
+            lamports: 100_000_000,
+            data,
+            owner: mid(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
+
 // --- property instruction builders ---
 
 pub fn default_params() -> ConfigParams {
@@ -343,6 +489,9 @@ pub fn default_params() -> ConfigParams {
         treasury: treasury(),
         rent_collector: sponsor().pubkey(),
         agent_deposit: AGENT_DEPOSIT,
+        agent_voting_time: VOTING_TIME,
+        min_voting_quorum_bps: QUORUM_BPS,
+        agent_notice_period: NOTICE_PERIOD,
     }
 }
 
@@ -431,6 +580,152 @@ pub fn remove_agent_ix(agent: &Pubkey, postcode: &[u8]) -> Instruction {
     )
 }
 
+// --- election / resignation instruction builders ---
+
+pub fn claim_property_ix(agent: &Pubkey, asset_id: u64, round: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::ClaimProperty { asset_id, round }.data(),
+        property::accounts::ClaimProperty {
+            agent: *agent,
+            payer: *agent,
+            config: property_config(),
+            agent_role: role_pda(agent, Role::LettingAgent),
+            agent_entry: agent_pda(agent),
+            property: mkt_property_pda(asset_id),
+            letting: letting_pda(asset_id),
+            candidacy: candidacy_pda(asset_id, round, agent),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn vote_agent_ix(
+    voter: &Pubkey,
+    asset_id: u64,
+    round: u64,
+    choice: &Pubkey,
+    previous: Option<&Pubkey>,
+    amount: u32,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::VoteOnAgent { asset_id, amount }.data(),
+        property::accounts::VoteOnAgent {
+            voter: *voter,
+            payer: sponsor().pubkey(),
+            voter_role: role_pda(voter, Role::RealEstateInvestor),
+            letting: letting_pda(asset_id),
+            holding: holding_pda(asset_id, voter),
+            vote_record: agent_vote_pda(asset_id, round, voter),
+            candidacy: candidacy_pda(asset_id, round, choice),
+            previous_candidacy: previous.map(|agent| candidacy_pda(asset_id, round, agent)),
+            cpi_auth: cpi_auth(),
+            marketplace_program: mid(),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn finalize_election_ix(
+    cranker: &Pubkey,
+    asset_id: u64,
+    round: u64,
+    winner: Option<&Pubkey>,
+    candidates: &[Pubkey],
+) -> Instruction {
+    let mut accounts = property::accounts::FinalizeAgentElection {
+        cranker: *cranker,
+        letting: letting_pda(asset_id),
+        property: mkt_property_pda(asset_id),
+        winner_entry: winner.map(agent_pda),
+    }
+    .to_account_metas(None);
+    for agent in candidates {
+        accounts.push(AccountMeta::new(candidacy_pda(asset_id, round, agent), false));
+    }
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::FinalizeAgentElection { asset_id }.data(),
+        accounts,
+    )
+}
+
+pub fn close_candidacy_ix(
+    cranker: &Pubkey,
+    rent_payer: &Pubkey,
+    asset_id: u64,
+    round: u64,
+    agent: &Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::CloseAgentCandidacy {
+            asset_id,
+            round,
+            agent: *agent,
+        }
+        .data(),
+        property::accounts::CloseAgentCandidacy {
+            cranker: *cranker,
+            rent_payer: *rent_payer,
+            letting: letting_pda(asset_id),
+            candidacy: candidacy_pda(asset_id, round, agent),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn unlock_votes_ix(voter: &Pubkey, asset_id: u64, round: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::UnlockAgentVotes { asset_id, round }.data(),
+        property::accounts::UnlockAgentVotes {
+            voter: *voter,
+            rent_payer: sponsor().pubkey(),
+            letting: letting_pda(asset_id),
+            holding: holding_pda(asset_id, voter),
+            vote_record: agent_vote_pda(asset_id, round, voter),
+            cpi_auth: cpi_auth(),
+            marketplace_program: mid(),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn resign_ix(agent: &Pubkey, asset_id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::Resign { asset_id }.data(),
+        property::accounts::Resign {
+            agent: *agent,
+            config: property_config(),
+            letting: letting_pda(asset_id),
+            notice: resignation_pda(asset_id),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn finalize_resignation_ix(cranker: &Pubkey, resigner: &Pubkey, asset_id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::FinalizeResignation { asset_id }.data(),
+        property::accounts::FinalizeResignation {
+            cranker: *cranker,
+            rent_payer: *resigner,
+            letting: letting_pda(asset_id),
+            property: mkt_property_pda(asset_id),
+            agent_entry: agent_pda(resigner),
+            notice: resignation_pda(asset_id),
+        }
+        .to_account_metas(None),
+    )
+}
+
 // --- state readers ---
 
 pub fn agent_of(svm: &LiteSVM, wallet: &Pubkey) -> LettingAgent {
@@ -441,6 +736,40 @@ pub fn agent_of(svm: &LiteSVM, wallet: &Pubkey) -> LettingAgent {
 pub fn config_of(svm: &LiteSVM) -> PropertyConfig {
     let acc = svm.get_account(&property_config()).unwrap();
     PropertyConfig::try_deserialize(&mut acc.data.as_slice()).unwrap()
+}
+
+pub fn letting_of(svm: &LiteSVM, asset_id: u64) -> PropertyLetting {
+    let acc = svm.get_account(&letting_pda(asset_id)).unwrap();
+    PropertyLetting::try_deserialize(&mut acc.data.as_slice()).unwrap()
+}
+
+pub fn candidacy_of(svm: &LiteSVM, asset_id: u64, round: u64, agent: &Pubkey) -> AgentCandidacy {
+    let acc = svm.get_account(&candidacy_pda(asset_id, round, agent)).unwrap();
+    AgentCandidacy::try_deserialize(&mut acc.data.as_slice()).unwrap()
+}
+
+pub fn holding_of(svm: &LiteSVM, asset_id: u64, owner: &Pubkey) -> ShareHolding {
+    let acc = svm.get_account(&holding_pda(asset_id, owner)).unwrap();
+    ShareHolding::try_deserialize(&mut acc.data.as_slice()).unwrap()
+}
+
+pub fn notice_of(svm: &LiteSVM, asset_id: u64) -> ResignationNotice {
+    let acc = svm.get_account(&resignation_pda(asset_id)).unwrap();
+    ResignationNotice::try_deserialize(&mut acc.data.as_slice()).unwrap()
+}
+
+pub fn account_gone(svm: &LiteSVM, address: &Pubkey) -> bool {
+    match svm.get_account(address) {
+        None => true,
+        Some(acc) => acc.data.is_empty(),
+    }
+}
+
+/// Move the clock forward.
+pub fn warp(svm: &mut LiteSVM, secs: i64) {
+    let mut clock = svm.get_sysvar::<Clock>();
+    clock.unix_timestamp += secs;
+    svm.set_sysvar(&clock);
 }
 
 // --- setup ---
@@ -458,6 +787,11 @@ pub fn setup() -> (LiteSVM, Keypair, Keypair) {
     svm.add_program(
         pid(),
         include_bytes!("../../../../target/deploy/property.so"),
+    )
+    .unwrap();
+    svm.add_program(
+        mid(),
+        include_bytes!("../../../../target/deploy/marketplace.so"),
     )
     .unwrap();
     set_mint(&mut svm);
@@ -499,5 +833,19 @@ pub fn new_agent(svm: &mut LiteSVM, admin: &Keypair) -> Keypair {
         admin,
         &[admin],
     );
+    kp
+}
+
+/// A SOL-funded keypair with the RealEstateInvestor role and a seeded share
+/// holding on the property.
+pub fn new_holder(svm: &mut LiteSVM, admin: &Keypair, asset_id: u64, shares: u32) -> Keypair {
+    let kp = funded(svm);
+    ok(
+        svm,
+        roles_assign_ix(&admin.pubkey(), &kp.pubkey(), Role::RealEstateInvestor),
+        admin,
+        &[admin],
+    );
+    seed_holding(svm, asset_id, &kp.pubkey(), shares);
     kp
 }

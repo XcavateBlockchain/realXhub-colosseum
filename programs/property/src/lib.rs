@@ -55,4 +55,44 @@ pub mod property {
     ) -> Result<()> {
         agents::remove_letting_agent_handler(ctx, postcode)
     }
+
+    pub fn claim_property(ctx: Context<ClaimProperty>, asset_id: u64, round: u64) -> Result<()> {
+        election::claim_property_handler(ctx, asset_id, round)
+    }
+
+    pub fn vote_on_agent(ctx: Context<VoteOnAgent>, asset_id: u64, amount: u32) -> Result<()> {
+        election::vote_on_agent_handler(ctx, asset_id, amount)
+    }
+
+    pub fn finalize_agent_election<'info>(
+        ctx: Context<'info, FinalizeAgentElection<'info>>,
+        asset_id: u64,
+    ) -> Result<()> {
+        election::finalize_agent_election_handler(ctx, asset_id)
+    }
+
+    pub fn close_agent_candidacy(
+        ctx: Context<CloseAgentCandidacy>,
+        asset_id: u64,
+        round: u64,
+        agent: Pubkey,
+    ) -> Result<()> {
+        election::close_agent_candidacy_handler(ctx, asset_id, round, agent)
+    }
+
+    pub fn unlock_agent_votes(
+        ctx: Context<UnlockAgentVotes>,
+        asset_id: u64,
+        round: u64,
+    ) -> Result<()> {
+        election::unlock_agent_votes_handler(ctx, asset_id, round)
+    }
+
+    pub fn resign(ctx: Context<Resign>, asset_id: u64) -> Result<()> {
+        resignation::resign_handler(ctx, asset_id)
+    }
+
+    pub fn finalize_resignation(ctx: Context<FinalizeResignation>, asset_id: u64) -> Result<()> {
+        resignation::finalize_resignation_handler(ctx, asset_id)
+    }
 }

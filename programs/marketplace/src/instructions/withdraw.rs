@@ -1,5 +1,9 @@
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::{create_idempotent, AssociatedToken, Create as CreateAta};
+use anchor_spl::token_2022::spl_token_2022::{
+    extension::StateWithExtensions,
+    state::{Account as TokenAccountState, Mint as MintState},
+};
 use anchor_spl::token_2022::{freeze_account, thaw_account, FreezeAccount, ThawAccount, Token2022};
 use anchor_spl::token_interface::{
     transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
@@ -62,31 +66,34 @@ pub struct WithdrawExpired<'info> {
     )]
     pub holding: Box<Account<'info, ShareHolding>>,
 
-    /// The mint the position was paid in; the refund goes out in the same one.
+    /// CHECK: the mint the position was paid in, pinned by address; kept
+    /// untyped to spare `try_accounts` stack, the reserve already vetted it.
     #[account(address = position.payment_mint @ MarketplaceError::PaymentMintMismatch)]
-    pub payment_mint: Box<InterfaceAccount<'info, Mint>>,
+    pub payment_mint: UncheckedAccount<'info>,
 
-    /// The investor's payment account the refund lands in.
-    #[account(
-        mut,
-        token::mint = payment_mint,
-        token::authority = investor,
-    )]
-    pub investor_payment: Box<InterfaceAccount<'info, TokenAccount>>,
+    /// CHECK: the investor's payment account the refund lands in; kept
+    /// untyped to spare `try_accounts` stack, the handler checks its mint
+    /// and owner. Deliberately not pinned to the recorded account: that one
+    /// may be closed, and a refund must never depend on it.
+    #[account(mut)]
+    pub investor_payment: UncheckedAccount<'info>,
 
     /// CHECK: the listing vault authority; a bare PDA owning the vault's
     /// token accounts.
     #[account(seeds = [LISTING_VAULT_SEED, &listing_id.to_le_bytes()], bump)]
     pub listing_vault: UncheckedAccount<'info>,
 
-    /// The vault's account for the payment mint, funded by the buys.
+    /// CHECK: the vault's account for the payment mint, funded by the buys;
+    /// pinned to its derivation.
     #[account(
         mut,
-        associated_token::mint = payment_mint,
-        associated_token::authority = listing_vault,
-        associated_token::token_program = payment_token_program,
+        address = anchor_spl::associated_token::get_associated_token_address_with_program_id(
+            &listing_vault.key(),
+            &payment_mint.key(),
+            &payment_token_program.key(),
+        ) @ MarketplaceError::WrongVaultAccount,
     )]
-    pub listing_payment_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub listing_payment_account: UncheckedAccount<'info>,
 
     /// CHECK: the share mint PDA (owned by the Token-2022 program).
     #[account(seeds = [SHARE_MINT_SEED, &listing_id.to_le_bytes()], bump)]
@@ -100,23 +107,29 @@ pub struct WithdrawExpired<'info> {
     #[account(seeds = [PROPERTY_VAULT_SEED, &listing_id.to_le_bytes()], bump)]
     pub property_vault: UncheckedAccount<'info>,
 
-    /// The vault's share account the shares return to.
+    /// CHECK: the vault's share account the shares return to, pinned to its
+    /// derivation.
     #[account(
         mut,
-        associated_token::mint = share_mint,
-        associated_token::authority = property_vault,
-        associated_token::token_program = share_token_program,
+        address = anchor_spl::associated_token::get_associated_token_address_with_program_id(
+            &property_vault.key(),
+            &share_mint.key(),
+            &share_token_program.key(),
+        ) @ MarketplaceError::WrongVaultAccount,
     )]
-    pub vault_share_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub vault_share_account: UncheckedAccount<'info>,
 
-    /// The investor's share account the shares leave.
+    /// CHECK: the investor's associated share account the shares leave,
+    /// pinned to its derivation; the token program rules on the balance.
     #[account(
         mut,
-        associated_token::mint = share_mint,
-        associated_token::authority = investor,
-        associated_token::token_program = share_token_program,
+        address = anchor_spl::associated_token::get_associated_token_address_with_program_id(
+            &investor.key(),
+            &share_mint.key(),
+            &share_token_program.key(),
+        ) @ MarketplaceError::WrongVaultAccount,
     )]
-    pub investor_share_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub investor_share_account: UncheckedAccount<'info>,
 
     /// The payment mint's token program (classic or Token-2022).
     pub payment_token_program: Interface<'info, TokenInterface>,
@@ -435,6 +448,21 @@ fn settle_dead_listing_exit(
         &[auth_seeds],
     ))?;
 
+    // The refund account must belong to the investor and carry the paid
+    // mint; any such account works, so a closed original can't strand it.
+    {
+        let data = ctx.accounts.investor_payment.try_borrow_data()?;
+        let account = StateWithExtensions::<TokenAccountState>::unpack(&data)?;
+        require!(
+            account.base.mint == ctx.accounts.position.payment_mint
+                && account.base.owner == ctx.accounts.investor.key(),
+            MarketplaceError::PaymentMintMismatch
+        );
+    }
+    let mint_decimals = {
+        let data = ctx.accounts.payment_mint.try_borrow_data()?;
+        StateWithExtensions::<MintState>::unpack(&data)?.base.decimals
+    };
     transfer_checked(
         CpiContext::new_with_signer(
             ctx.accounts.payment_token_program.key(),
@@ -447,7 +475,7 @@ fn settle_dead_listing_exit(
             &[vault_seeds],
         ),
         refund,
-        ctx.accounts.payment_mint.decimals,
+        mint_decimals,
     )?;
 
     ctx.accounts.property.holder_count = ctx

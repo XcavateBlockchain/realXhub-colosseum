@@ -246,4 +246,22 @@ pub mod marketplace {
     pub fn close_reservation(ctx: Context<CloseReservation>) -> Result<()> {
         reserve::close_reservation_handler(ctx)
     }
+
+    pub fn lock_shares(
+        ctx: Context<AdjustShareLock>,
+        asset_id: u64,
+        owner: Pubkey,
+        amount: u32,
+    ) -> Result<()> {
+        locks::lock_shares_handler(ctx, asset_id, owner, amount)
+    }
+
+    pub fn unlock_shares(
+        ctx: Context<AdjustShareLock>,
+        asset_id: u64,
+        owner: Pubkey,
+        amount: u32,
+    ) -> Result<()> {
+        locks::unlock_shares_handler(ctx, asset_id, owner, amount)
+    }
 }

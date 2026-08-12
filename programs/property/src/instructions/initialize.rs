@@ -11,6 +11,9 @@ pub struct ConfigParams {
     pub treasury: Pubkey,
     pub rent_collector: Pubkey,
     pub agent_deposit: u64,
+    pub agent_voting_time: i64,
+    pub min_voting_quorum_bps: u16,
+    pub agent_notice_period: i64,
 }
 
 impl ConfigParams {
@@ -20,6 +23,14 @@ impl ConfigParams {
             PropertyError::InvalidConfig
         );
         require!(self.agent_deposit > 0, PropertyError::InvalidConfig);
+        require!(
+            self.agent_voting_time > 0 && self.agent_notice_period > 0,
+            PropertyError::InvalidConfig
+        );
+        require!(
+            self.min_voting_quorum_bps <= 10_000,
+            PropertyError::InvalidConfig
+        );
         Ok(())
     }
 
@@ -27,6 +38,9 @@ impl ConfigParams {
         config.treasury = self.treasury;
         config.rent_collector = self.rent_collector;
         config.agent_deposit = self.agent_deposit;
+        config.agent_voting_time = self.agent_voting_time;
+        config.min_voting_quorum_bps = self.min_voting_quorum_bps;
+        config.agent_notice_period = self.agent_notice_period;
     }
 }
 
