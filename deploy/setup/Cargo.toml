@@ -1,0 +1,23 @@
+[package]
+name = "xcavate-setup"
+version = "0.1.0"
+description = "One-shot protocol bootstrap after deploying the realXmarket programs"
+edition = "2021"
+
+[[bin]]
+name = "xcavate-setup"
+path = "src/main.rs"
+
+[dependencies]
+anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+xcavate-whitelist = { path = "../../programs/xcavate-whitelist", features = ["cpi", "no-entrypoint"] }
+regions = { path = "../../programs/regions", features = ["cpi", "no-entrypoint"] }
+marketplace = { path = "../../programs/marketplace", features = ["cpi", "no-entrypoint"] }
+property = { path = "../../programs/property", features = ["cpi", "no-entrypoint"] }
+solana-rpc-client = "3.0"
+solana-commitment-config = "3.0"
+solana-message = { workspace = true }
+solana-transaction = { workspace = true }
+solana-signer = { workspace = true }
+solana-keypair = { workspace = true }

@@ -6,3 +6,7 @@ node_modules
 test-ledger
 .yarn
 .surfpool
+
+# deployment keys and generated addresses stay out of git
+deploy/keys
+deploy/addresses.json
