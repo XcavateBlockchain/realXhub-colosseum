@@ -18,6 +18,16 @@ use xcavate_whitelist::{ADMIN_SEED, CONFIG_SEED, ROLE_SEED};
 
 const SYS: Pubkey = anchor_lang::system_program::ID;
 
+// Reads the program binary from target/deploy at runtime rather than via
+// include_bytes!, so the test crate compiles on a fresh clone where the .so
+// doesn't exist yet (anchor's IDL pass compiles tests too).
+fn program_bytes() -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/deploy/xcavate_whitelist.so");
+    std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("{} missing, run `anchor build` first", path.display()))
+}
+
 // --- PDA helpers ---
 
 fn pid() -> Pubkey {
@@ -242,11 +252,7 @@ fn funded(svm: &mut LiteSVM) -> Keypair {
 // `authority`.
 fn setup() -> (LiteSVM, Keypair) {
     let mut svm = LiteSVM::new();
-    svm.add_program(
-        pid(),
-        include_bytes!("../../../target/deploy/xcavate_whitelist.so"),
-    )
-    .unwrap();
+    svm.add_program(pid(), &program_bytes()).unwrap();
     let authority = funded(&mut svm);
     bind_upgrade_authority(&mut svm, &authority.pubkey());
     ok(
@@ -969,11 +975,7 @@ fn removed_admin_loses_power() {
 #[test]
 fn initialize_config_requires_upgrade_authority() {
     let mut svm = LiteSVM::new();
-    svm.add_program(
-        pid(),
-        include_bytes!("../../../target/deploy/xcavate_whitelist.so"),
-    )
-    .unwrap();
+    svm.add_program(pid(), &program_bytes()).unwrap();
     let deployer = funded(&mut svm);
     bind_upgrade_authority(&mut svm, &deployer.pubkey());
 
@@ -1002,11 +1004,7 @@ fn initialize_config_rejects_spoofed_program_data() {
     // fabricated ProgramData that names themselves as upgrade authority to seize
     // the singleton config the other programs trust cross-program.
     let mut svm = LiteSVM::new();
-    svm.add_program(
-        pid(),
-        include_bytes!("../../../target/deploy/xcavate_whitelist.so"),
-    )
-    .unwrap();
+    svm.add_program(pid(), &program_bytes()).unwrap();
 
     // Forge a well-formed ProgramData at a foreign address whose upgrade
     // authority is the imposter, so it clears the authority-equals-signer check.

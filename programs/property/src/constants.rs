@@ -24,3 +24,12 @@ pub const RESIGNATION_SEED: &[u8] = b"resignation";
 /// Signer PDA for CPIs into the marketplace; carries no account data.
 #[constant]
 pub const CPI_AUTH_SEED: &[u8] = b"cpi-auth";
+
+#[constant]
+pub const INCOME_SEED: &[u8] = b"income";
+
+#[constant]
+pub const INCOME_VAULT_SEED: &[u8] = b"income-vault";
+
+#[constant]
+pub const CHECKPOINT_SEED: &[u8] = b"checkpoint";

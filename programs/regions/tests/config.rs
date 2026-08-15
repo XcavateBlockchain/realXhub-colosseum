@@ -7,8 +7,7 @@ use common::*;
 #[test]
 fn init_rejects_bad_threshold() {
     let mut svm = LiteSVM::new();
-    svm.add_program(rid(), include_bytes!("../../../target/deploy/regions.so"))
-        .unwrap();
+    svm.add_program(rid(), &program_bytes("regions")).unwrap();
     set_mint(&mut svm);
     let authority = funded(&mut svm);
     bind_upgrade_authority(&mut svm, &rid(), &authority.pubkey());
@@ -187,8 +186,7 @@ fn update_authority_reproposal_overwrites_pending() {
 #[test]
 fn init_requires_upgrade_authority() {
     let mut svm = LiteSVM::new();
-    svm.add_program(rid(), include_bytes!("../../../target/deploy/regions.so"))
-        .unwrap();
+    svm.add_program(rid(), &program_bytes("regions")).unwrap();
     set_mint(&mut svm);
     let deployer = funded(&mut svm);
     bind_upgrade_authority(&mut svm, &rid(), &deployer.pubkey());

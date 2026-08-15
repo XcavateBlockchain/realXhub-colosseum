@@ -18,7 +18,7 @@ pub use instructions::ConfigParams;
 
 use instructions::*;
 
-declare_id!("8f4NHc1wGBM1BAufDFd9dNechLW8pxmStSfxfuJfDzob");
+declare_id!("deCp9srk9C6P4BXJaFpjR5H6Jsm6DCq8AL2kk338dVq");
 
 #[program]
 pub mod property {
@@ -49,10 +49,7 @@ pub mod property {
         agents::add_letting_agent_handler(ctx, region_id, postcode, max_deposit)
     }
 
-    pub fn remove_letting_agent(
-        ctx: Context<RemoveLettingAgent>,
-        postcode: Vec<u8>,
-    ) -> Result<()> {
+    pub fn remove_letting_agent(ctx: Context<RemoveLettingAgent>, postcode: Vec<u8>) -> Result<()> {
         agents::remove_letting_agent_handler(ctx, postcode)
     }
 
@@ -86,6 +83,32 @@ pub mod property {
         round: u64,
     ) -> Result<()> {
         election::unlock_agent_votes_handler(ctx, asset_id, round)
+    }
+
+    pub fn distribute_income(
+        ctx: Context<DistributeIncome>,
+        asset_id: u64,
+        amount: u64,
+    ) -> Result<()> {
+        income::distribute_income_handler(ctx, asset_id, amount)
+    }
+
+    pub fn claim_income<'info>(
+        ctx: Context<'info, ClaimIncome<'info>>,
+        asset_id: u64,
+    ) -> Result<()> {
+        income::claim_income_handler(ctx, asset_id)
+    }
+
+    pub fn settle_income(ctx: Context<SettleIncome>, asset_id: u64, owner: Pubkey) -> Result<()> {
+        income::settle_income_handler(ctx, asset_id, owner)
+    }
+
+    pub fn close_income_checkpoint<'info>(
+        ctx: Context<'info, CloseIncomeCheckpoint<'info>>,
+        asset_id: u64,
+    ) -> Result<()> {
+        income::close_income_checkpoint_handler(ctx, asset_id)
     }
 
     pub fn resign(ctx: Context<Resign>, asset_id: u64) -> Result<()> {

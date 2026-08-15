@@ -1,6 +1,8 @@
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::{create_idempotent, AssociatedToken, Create as CreateAta};
-use anchor_spl::token_2022::spl_token_2022::{extension::StateWithExtensions, state::Mint as MintState};
+use anchor_spl::token_2022::spl_token_2022::{
+    extension::StateWithExtensions, state::Mint as MintState,
+};
 use anchor_spl::token_2022::{freeze_account, thaw_account, FreezeAccount, ThawAccount, Token2022};
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
@@ -412,7 +414,9 @@ pub fn claim_shares_handler(ctx: Context<ClaimShares>, listing_id: u64) -> Resul
     ))?;
     let mint_decimals = {
         let data = ctx.accounts.payment_mint.try_borrow_data()?;
-        StateWithExtensions::<MintState>::unpack(&data)?.base.decimals
+        StateWithExtensions::<MintState>::unpack(&data)?
+            .base
+            .decimals
     };
     // The payment itself doubles as the check that the promised money is
     // still there: the token program rejects the transfer if it is not.

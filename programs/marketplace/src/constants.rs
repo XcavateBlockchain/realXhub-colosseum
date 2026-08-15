@@ -46,4 +46,6 @@ pub const RESERVATION_SEED: &[u8] = b"reservation";
 pub const CPI_AUTH_SEED: &[u8] = b"cpi-auth";
 
 /// The property program, the only caller allowed on the share-lock surface.
-pub const PROPERTY_PROGRAM: Pubkey = pubkey!("8f4NHc1wGBM1BAufDFd9dNechLW8pxmStSfxfuJfDzob");
+/// `anchor keys sync` does not touch this, so update it by hand whenever the
+/// property program id rotates.
+pub const PROPERTY_PROGRAM: Pubkey = pubkey!("deCp9srk9C6P4BXJaFpjR5H6Jsm6DCq8AL2kk338dVq");

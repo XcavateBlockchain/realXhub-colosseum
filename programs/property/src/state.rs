@@ -123,6 +123,66 @@ pub struct ResignationNotice {
     pub bump: u8,
 }
 
+/// Most payment mints one property can ever receive income in. Twice the
+/// marketplace's accepted-mint cap, so the protocol can rotate mints a few
+/// times without capping a long-lived property's income.
+pub const MAX_INCOME_STREAMS: usize = 8;
+
+/// One payment mint's income stream for a property.
+#[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, PartialEq, Eq, Debug)]
+pub struct IncomeStream {
+    pub mint: Pubkey,
+    /// Cumulative income per share since the stream opened, in raw token
+    /// units. Wide on purpose: a stream lives as long as the property.
+    pub per_share: u128,
+    /// Remainder of the last distribution below one unit per share, carried
+    /// into the next one so nothing is stranded.
+    pub dust: u64,
+}
+
+/// A property's rental income ledger, one stream per payment mint. Substrate
+/// keeps a single accumulator and substitutes assets 1:1 at payout; the
+/// streams stay separate here because the mints differ in decimals. The
+/// funds sit in the income vault's token accounts, apart from every other
+/// pot, so nothing else can spend money already owed to holders.
+#[account]
+#[derive(InitSpace)]
+pub struct PropertyIncome {
+    pub asset_id: u64,
+    /// Append-only: checkpoints refer to streams by index.
+    #[max_len(MAX_INCOME_STREAMS)]
+    pub streams: Vec<IncomeStream>,
+    /// The wallet that fronted the account's rent.
+    pub rent_payer: Pubkey,
+    pub bump: u8,
+}
+
+/// A holder's claim state against the stream at the same index.
+#[derive(
+    AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, PartialEq, Eq, Debug, Default,
+)]
+pub struct CheckpointEntry {
+    /// The stream's `per_share` the holder is paid or banked up to.
+    pub per_share: u128,
+    /// Income banked for the holder but not yet paid out, written when a
+    /// settle runs ahead of a balance change.
+    pub pending: u64,
+}
+
+/// One holder's income position on one property. `entries[i]` tracks
+/// `streams[i]`; missing tail entries read as zero.
+#[account]
+#[derive(InitSpace)]
+pub struct IncomeCheckpoint {
+    pub asset_id: u64,
+    pub owner: Pubkey,
+    #[max_len(MAX_INCOME_STREAMS)]
+    pub entries: Vec<CheckpointEntry>,
+    /// The wallet that fronted the account's rent; refunded at close.
+    pub rent_payer: Pubkey,
+    pub bump: u8,
+}
+
 /// A letting agent's registry entry, one per wallet. Agents work one region
 /// and any number of its locations up to the cap; each location holds its
 /// own deposit and counts the properties assigned there.

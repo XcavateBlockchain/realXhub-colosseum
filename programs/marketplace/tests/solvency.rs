@@ -177,9 +177,9 @@ proptest! {
 
         for (who, kind, amount) in ops {
             let investor = &investors[who as usize];
-            // The election ops read the listing to aim their round argument,
-            // which a torn-down walk no longer has.
-            if (7..=10).contains(&kind) && !account_alive(&svm, &listing_pda(0)) {
+            // The election ops and the reserve-the-rest op read the listing
+            // to aim their arguments, which a torn-down walk no longer has.
+            if ((7..=10).contains(&kind) || kind == 13) && !account_alive(&svm, &listing_pda(0)) {
                 continue;
             }
             // Failures (cap, cancelled, expired, wrong state, wrong round)

@@ -71,4 +71,24 @@ pub enum PropertyError {
     NotAssignedAgent,
     #[msg("The resignation notice period is still running")]
     NoticePeriodRunning,
+    #[msg("Distribution amount must be greater than zero")]
+    ZeroDistribution,
+    #[msg("Payment mint is not accepted by the marketplace")]
+    PaymentMintNotAccepted,
+    /// The stream list is append-only and capped; a property outliving that
+    /// many mint rotations cannot open another stream.
+    #[msg("Too many income streams for one property")]
+    TooManyIncomeStreams,
+    #[msg("No income stream for this mint")]
+    UnknownIncomeStream,
+    #[msg("Nothing to claim")]
+    NothingToClaim,
+    #[msg("Holding account does not match the owner")]
+    HoldingMismatch,
+    #[msg("Payment account does not match the mint and owner")]
+    PaymentAccountMismatch,
+    #[msg("Income is still banked for this checkpoint")]
+    PendingIncome,
+    #[msg("Checkpoint owner still holds shares")]
+    SharesStillHeld,
 }

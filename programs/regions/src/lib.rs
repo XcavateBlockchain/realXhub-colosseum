@@ -11,7 +11,7 @@ pub use constants::*;
 pub use instructions::*;
 pub use state::*;
 
-declare_id!("FYysH5v23qtz4gK4H1yLDHneFwx6PSAT7oQwHcuRyRh");
+declare_id!("5iupkzVtWxee48UXh3s615V9sXXuYjsSr61VPuduXdPc");
 
 /// Region governance for the realXmarket protocol: a regional operator proposes
 /// a region by bonding XCAV, holders vote, and on a pass the proposer claims it

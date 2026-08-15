@@ -118,7 +118,11 @@ pub struct ClaimProperty<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn claim_property_handler(ctx: Context<ClaimProperty>, asset_id: u64, round: u64) -> Result<()> {
+pub fn claim_property_handler(
+    ctx: Context<ClaimProperty>,
+    asset_id: u64,
+    round: u64,
+) -> Result<()> {
     require!(
         ctx.accounts.property.finalized,
         PropertyError::PropertyNotFinalized
@@ -130,10 +134,7 @@ pub fn claim_property_handler(ctx: Context<ClaimProperty>, asset_id: u64, round:
         letting.rent_payer = ctx.accounts.payer.key();
         letting.bump = ctx.bumps.letting;
     }
-    require!(
-        letting.agent == Pubkey::default(),
-        PropertyError::SeatTaken
-    );
+    require!(letting.agent == Pubkey::default(), PropertyError::SeatTaken);
 
     // The agent must cover the property's location; the entry's region and
     // location list are maintained by the registry instructions.
@@ -144,7 +145,10 @@ pub fn claim_property_handler(ctx: Context<ClaimProperty>, asset_id: u64, round:
         PropertyError::WrongRegion
     );
     require!(
-        entry.locations.iter().any(|l| l.postcode == property.location),
+        entry
+            .locations
+            .iter()
+            .any(|l| l.postcode == property.location),
         PropertyError::NotInLocation
     );
 
@@ -444,16 +448,12 @@ pub fn finalize_agent_election_handler<'info>(
             _ => {}
         }
     }
-    let quorum_met = total * 10_000
-        > ctx.accounts.property.share_amount as u64 * election.quorum_bps as u64;
+    let quorum_met =
+        total * 10_000 > ctx.accounts.property.share_amount as u64 * election.quorum_bps as u64;
 
     let mut assigned = false;
     let (winner, top_power) = leader.unwrap_or_default();
-    if quorum_met
-        && !tied
-        && top_power > 0
-        && ctx.accounts.letting.agent == Pubkey::default()
-    {
+    if quorum_met && !tied && top_power > 0 && ctx.accounts.letting.agent == Pubkey::default() {
         // The win only sticks if the winner still covers the location; an
         // agent who left mid-election fails the round instead of wedging it.
         let expected = Pubkey::find_program_address(&[AGENT_SEED, winner.as_ref()], &crate::ID).0;

@@ -8,11 +8,8 @@ use common::*;
 /// keypair bound, but no config yet.
 fn pre_init() -> (LiteSVM, Keypair) {
     let mut svm = LiteSVM::new();
-    svm.add_program(
-        mid(),
-        include_bytes!("../../../target/deploy/marketplace.so"),
-    )
-    .unwrap();
+    svm.add_program(mid(), &program_bytes("marketplace"))
+        .unwrap();
     set_mint(&mut svm);
     let authority = funded(&mut svm);
     bind_upgrade_authority(&mut svm, &mid(), &authority.pubkey());

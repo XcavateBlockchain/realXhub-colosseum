@@ -13,15 +13,16 @@ pub use anchor_lang::prelude::Pubkey;
 pub use anchor_lang::solana_program::clock::Clock;
 pub use anchor_lang::AccountDeserialize;
 pub use litesvm::LiteSVM;
-pub use marketplace::state::{PropertyAsset, ShareHolding};
+pub use marketplace::state::{Config as MarketConfig, PropertyAsset, ShareHolding};
 pub use property::state::{
-    AgentCandidacy, AgentVote, Config as PropertyConfig, LettingAgent, PropertyLetting,
-    ResignationNotice,
+    AgentCandidacy, AgentElection, AgentVote, CheckpointEntry, Config as PropertyConfig,
+    IncomeCheckpoint, LettingAgent, PropertyIncome, PropertyLetting, ResignationNotice,
 };
 pub use solana_keypair::Keypair;
 pub use solana_signer::Signer;
 pub use xcavate_whitelist::state::Role;
 
+use anchor_lang::solana_program::instruction::AccountMeta;
 use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::solana_program::program_option::COption;
 use anchor_lang::solana_program::program_pack::Pack;
@@ -30,11 +31,10 @@ use anchor_lang::{InstructionData, ToAccountMetas};
 use anchor_spl::token::spl_token::state::{Account as SplAccount, AccountState, Mint as SplMint};
 use anchor_spl::token::ID as TOKEN_PROGRAM_ID;
 use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};
-use anchor_lang::solana_program::instruction::AccountMeta;
 use property::instructions::ConfigParams;
 use property::{
-    AGENT_CANDIDATE_SEED, AGENT_SEED, AGENT_VOTE_SEED, CONFIG_SEED, CPI_AUTH_SEED, LETTING_SEED,
-    RESIGNATION_SEED, VAULT_SEED,
+    AGENT_CANDIDATE_SEED, AGENT_SEED, AGENT_VOTE_SEED, CHECKPOINT_SEED, CONFIG_SEED, CPI_AUTH_SEED,
+    INCOME_SEED, INCOME_VAULT_SEED, LETTING_SEED, RESIGNATION_SEED, VAULT_SEED,
 };
 use solana_account::Account;
 use solana_message::{Message, VersionedMessage};
@@ -128,6 +128,28 @@ pub fn agent_vote_pda(asset_id: u64, round: u64, voter: &Pubkey) -> Pubkey {
 pub fn resignation_pda(asset_id: u64) -> Pubkey {
     Pubkey::find_program_address(&[RESIGNATION_SEED, &asset_id.to_le_bytes()], &pid()).0
 }
+pub fn income_pda(asset_id: u64) -> Pubkey {
+    Pubkey::find_program_address(&[INCOME_SEED, &asset_id.to_le_bytes()], &pid()).0
+}
+pub fn income_vault_pda(asset_id: u64) -> Pubkey {
+    Pubkey::find_program_address(&[INCOME_VAULT_SEED, &asset_id.to_le_bytes()], &pid()).0
+}
+pub fn income_vault_ata(asset_id: u64, mint: &Pubkey) -> Pubkey {
+    anchor_spl::associated_token::get_associated_token_address(&income_vault_pda(asset_id), mint)
+}
+pub fn checkpoint_pda(asset_id: u64, owner: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[CHECKPOINT_SEED, &asset_id.to_le_bytes(), owner.as_ref()],
+        &pid(),
+    )
+    .0
+}
+pub fn mkt_config_pda() -> Pubkey {
+    Pubkey::find_program_address(&[marketplace::CONFIG_SEED], &mid()).0
+}
+pub fn mkt_cpi_auth() -> Pubkey {
+    Pubkey::find_program_address(&[b"cpi-auth"], &mid()).0
+}
 pub fn cpi_auth() -> Pubkey {
     Pubkey::find_program_address(&[CPI_AUTH_SEED], &pid()).0
 }
@@ -172,18 +194,18 @@ pub fn token_acc(owner: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"xcav_token", owner.as_ref()], &pid()).0
 }
 
-pub fn set_mint(svm: &mut LiteSVM) {
+pub fn set_mint_at(svm: &mut LiteSVM, address: Pubkey, decimals: u8) {
     let mint = SplMint {
         mint_authority: COption::None,
         supply: 1_000_000_000_000,
-        decimals: DECIMALS,
+        decimals,
         is_initialized: true,
         freeze_authority: COption::None,
     };
     let mut data = vec![0u8; SplMint::LEN];
     mint.pack_into_slice(&mut data);
     svm.set_account(
-        xcav_mint(),
+        address,
         Account {
             lamports: 100_000_000,
             data,
@@ -195,9 +217,19 @@ pub fn set_mint(svm: &mut LiteSVM) {
     .unwrap();
 }
 
-pub fn set_token_account(svm: &mut LiteSVM, address: Pubkey, owner: &Pubkey, amount: u64) {
+pub fn set_mint(svm: &mut LiteSVM) {
+    set_mint_at(svm, xcav_mint(), DECIMALS);
+}
+
+pub fn set_token_account_for(
+    svm: &mut LiteSVM,
+    mint: Pubkey,
+    address: Pubkey,
+    owner: &Pubkey,
+    amount: u64,
+) {
     let acc = SplAccount {
-        mint: xcav_mint(),
+        mint,
         owner: *owner,
         amount,
         delegate: COption::None,
@@ -219,6 +251,23 @@ pub fn set_token_account(svm: &mut LiteSVM, address: Pubkey, owner: &Pubkey, amo
         },
     )
     .unwrap();
+}
+
+pub fn set_token_account(svm: &mut LiteSVM, address: Pubkey, owner: &Pubkey, amount: u64) {
+    set_token_account_for(svm, xcav_mint(), address, owner, amount);
+}
+
+/// Deterministic token account for an owner in an arbitrary mint. Not a real
+/// ATA; the program only checks the mint and authority.
+pub fn token_acc_for(mint: &Pubkey, owner: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"pay_token", mint.as_ref(), owner.as_ref()], &pid()).0
+}
+
+pub fn balance_at(svm: &LiteSVM, address: &Pubkey) -> u64 {
+    match svm.get_account(address) {
+        Some(acc) if !acc.data.is_empty() => SplAccount::unpack(&acc.data).unwrap().amount,
+        _ => 0,
+    }
 }
 
 pub fn give_xcav(svm: &mut LiteSVM, owner: &Pubkey, amount: u64) {
@@ -450,8 +499,58 @@ pub fn set_property_finalized(svm: &mut LiteSVM, asset_id: u64, finalized: bool)
     svm.set_account(address, Account { data, ..acc }).unwrap();
 }
 
+/// Write the marketplace `Config` at its canonical PDA with the given
+/// accepted payment mints. Income distribution only reads that list.
+pub fn seed_market_config(svm: &mut LiteSVM, accepted: &[Pubkey]) {
+    let (address, bump) = Pubkey::find_program_address(&[marketplace::CONFIG_SEED], &mid());
+    let config = MarketConfig {
+        authority: Pubkey::new_unique(),
+        pending_authority: None,
+        xcav_mint: xcav_mint(),
+        treasury: treasury(),
+        rent_collector: sponsor().pubkey(),
+        accepted_payment_mints: accepted.to_vec(),
+        listing_deposit: 0,
+        lawyer_deposit: 0,
+        min_property_shares: 1,
+        max_property_shares: SHARE_SUPPLY,
+        marketplace_fee_bps: 0,
+        investor_fee_bps: 0,
+        max_ownership_bps: 10_000,
+        claiming_time: 0,
+        legal_process_time: 0,
+        lawyer_voting_time: 0,
+        min_voting_quorum_bps: 0,
+        next_listing_id: 0,
+        bump,
+    };
+    let mut data = MarketConfig::DISCRIMINATOR.to_vec();
+    config.serialize(&mut data).unwrap();
+    svm.set_account(
+        address,
+        Account {
+            lamports: 100_000_000,
+            data,
+            owner: mid(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
+
 /// Write a holder's `ShareHolding` at its canonical marketplace PDA.
 pub fn seed_holding(svm: &mut LiteSVM, asset_id: u64, owner: &Pubkey, amount: u32) {
+    seed_holding_with_lock(svm, asset_id, owner, amount, 0);
+}
+
+pub fn seed_holding_with_lock(
+    svm: &mut LiteSVM,
+    asset_id: u64,
+    owner: &Pubkey,
+    amount: u32,
+    locked_amount: u32,
+) {
     let (address, bump) = Pubkey::find_program_address(
         &[
             marketplace::SHARE_SEED,
@@ -464,7 +563,7 @@ pub fn seed_holding(svm: &mut LiteSVM, asset_id: u64, owner: &Pubkey, amount: u3
         asset_id,
         owner: *owner,
         amount,
-        locked_amount: 0,
+        locked_amount,
         bump,
     };
     let mut data = ShareHolding::DISCRIMINATOR.to_vec();
@@ -475,6 +574,70 @@ pub fn seed_holding(svm: &mut LiteSVM, asset_id: u64, owner: &Pubkey, amount: u3
             lamports: 100_000_000,
             data,
             owner: mid(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
+
+/// Write a `PropertyLetting` with an assigned agent, exactly as a finished
+/// election would leave it. Income tests skip the election lifecycle.
+pub fn seed_letting(svm: &mut LiteSVM, asset_id: u64, agent: &Pubkey) {
+    let (address, bump) =
+        Pubkey::find_program_address(&[LETTING_SEED, &asset_id.to_le_bytes()], &pid());
+    let letting = PropertyLetting {
+        asset_id,
+        agent: *agent,
+        election: AgentElection::default(),
+        rent_payer: Pubkey::new_unique(),
+        bump,
+    };
+    let mut data = PropertyLetting::DISCRIMINATOR.to_vec();
+    letting.serialize(&mut data).unwrap();
+    svm.set_account(
+        address,
+        Account {
+            lamports: 100_000_000,
+            data,
+            owner: pid(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
+
+/// Write an `IncomeCheckpoint` directly, for states only a marketplace
+/// settle CPI could otherwise produce (banked pending income).
+pub fn seed_checkpoint(
+    svm: &mut LiteSVM,
+    asset_id: u64,
+    owner: &Pubkey,
+    entries: &[CheckpointEntry],
+    rent_payer: &Pubkey,
+) {
+    let (address, bump) = Pubkey::find_program_address(
+        &[CHECKPOINT_SEED, &asset_id.to_le_bytes(), owner.as_ref()],
+        &pid(),
+    );
+    let checkpoint = IncomeCheckpoint {
+        asset_id,
+        owner: *owner,
+        entries: entries.to_vec(),
+        rent_payer: *rent_payer,
+        bump,
+    };
+    let mut data = IncomeCheckpoint::DISCRIMINATOR.to_vec();
+    checkpoint.serialize(&mut data).unwrap();
+    // Pad to the program's declared space; init_if_needed checks it.
+    data.resize(8 + <IncomeCheckpoint as anchor_lang::Space>::INIT_SPACE, 0);
+    svm.set_account(
+        address,
+        Account {
+            lamports: 100_000_000,
+            data,
+            owner: pid(),
             executable: false,
             rent_epoch: 0,
         },
@@ -644,7 +807,10 @@ pub fn finalize_election_ix(
     }
     .to_account_metas(None);
     for agent in candidates {
-        accounts.push(AccountMeta::new(candidacy_pda(asset_id, round, agent), false));
+        accounts.push(AccountMeta::new(
+            candidacy_pda(asset_id, round, agent),
+            false,
+        ));
     }
     Instruction::new_with_bytes(
         pid(),
@@ -726,6 +892,87 @@ pub fn finalize_resignation_ix(cranker: &Pubkey, resigner: &Pubkey, asset_id: u6
     )
 }
 
+// --- income instruction builders ---
+
+pub fn distribute_ix(agent: &Pubkey, asset_id: u64, mint: &Pubkey, amount: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::DistributeIncome { asset_id, amount }.data(),
+        property::accounts::DistributeIncome {
+            agent: *agent,
+            payer: *agent,
+            agent_role: role_pda(agent, Role::LettingAgent),
+            letting: letting_pda(asset_id),
+            property: mkt_property_pda(asset_id),
+            market_config: mkt_config_pda(),
+            income: income_pda(asset_id),
+            payment_mint: *mint,
+            agent_payment: token_acc_for(mint, agent),
+            income_vault: income_vault_pda(asset_id),
+            vault_payment_account: income_vault_ata(asset_id, mint),
+            payment_token_program: TOKEN_PROGRAM_ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn claim_ix(holder: &Pubkey, asset_id: u64, mint: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::ClaimIncome { asset_id }.data(),
+        property::accounts::ClaimIncome {
+            holder: *holder,
+            payer: sponsor().pubkey(),
+            income: income_pda(asset_id),
+            checkpoint: checkpoint_pda(asset_id, holder),
+            holding: holding_pda(asset_id, holder),
+            payment_mint: *mint,
+            income_vault: income_vault_pda(asset_id),
+            vault_payment_account: income_vault_ata(asset_id, mint),
+            holder_payment: token_acc_for(mint, holder),
+            payment_token_program: TOKEN_PROGRAM_ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn settle_ix(signer: &Pubkey, payer: &Pubkey, asset_id: u64, owner: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::SettleIncome {
+            asset_id,
+            owner: *owner,
+        }
+        .data(),
+        property::accounts::SettleIncome {
+            marketplace_signer: *signer,
+            payer: *payer,
+            income: income_pda(asset_id),
+            holding: holding_pda(asset_id, owner),
+            checkpoint: checkpoint_pda(asset_id, owner),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn close_checkpoint_ix(holder: &Pubkey, rent_payer: &Pubkey, asset_id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::CloseIncomeCheckpoint { asset_id }.data(),
+        property::accounts::CloseIncomeCheckpoint {
+            holder: *holder,
+            rent_payer: *rent_payer,
+            checkpoint: checkpoint_pda(asset_id, holder),
+            holding: holding_pda(asset_id, holder),
+        }
+        .to_account_metas(None),
+    )
+}
+
 // --- state readers ---
 
 pub fn agent_of(svm: &LiteSVM, wallet: &Pubkey) -> LettingAgent {
@@ -744,13 +991,25 @@ pub fn letting_of(svm: &LiteSVM, asset_id: u64) -> PropertyLetting {
 }
 
 pub fn candidacy_of(svm: &LiteSVM, asset_id: u64, round: u64, agent: &Pubkey) -> AgentCandidacy {
-    let acc = svm.get_account(&candidacy_pda(asset_id, round, agent)).unwrap();
+    let acc = svm
+        .get_account(&candidacy_pda(asset_id, round, agent))
+        .unwrap();
     AgentCandidacy::try_deserialize(&mut acc.data.as_slice()).unwrap()
 }
 
 pub fn holding_of(svm: &LiteSVM, asset_id: u64, owner: &Pubkey) -> ShareHolding {
     let acc = svm.get_account(&holding_pda(asset_id, owner)).unwrap();
     ShareHolding::try_deserialize(&mut acc.data.as_slice()).unwrap()
+}
+
+pub fn income_of(svm: &LiteSVM, asset_id: u64) -> PropertyIncome {
+    let acc = svm.get_account(&income_pda(asset_id)).unwrap();
+    PropertyIncome::try_deserialize(&mut acc.data.as_slice()).unwrap()
+}
+
+pub fn checkpoint_of(svm: &LiteSVM, asset_id: u64, owner: &Pubkey) -> IncomeCheckpoint {
+    let acc = svm.get_account(&checkpoint_pda(asset_id, owner)).unwrap();
+    IncomeCheckpoint::try_deserialize(&mut acc.data.as_slice()).unwrap()
 }
 
 pub fn notice_of(svm: &LiteSVM, asset_id: u64) -> ResignationNotice {
@@ -774,26 +1033,34 @@ pub fn warp(svm: &mut LiteSVM, secs: i64) {
 
 // --- setup ---
 
+/// Reads a program binary from target/deploy at runtime rather than via
+/// include_bytes!, so the test crates compile on a fresh clone where the .so
+/// files don't exist yet (anchor's IDL pass compiles tests too).
+pub fn program_bytes(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/deploy")
+        .join(format!("{name}.so"));
+    std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("{} missing, run `anchor build` first", path.display()))
+}
+
 /// Loads the roles and property programs, seeds the XCAV mint, initializes
 /// both configs, and returns (svm, admin, authority). The admin can hand out
 /// roles.
 pub fn setup() -> (LiteSVM, Keypair, Keypair) {
-    let mut svm = LiteSVM::new();
-    svm.add_program(
-        roles_id(),
-        include_bytes!("../../../../target/deploy/xcavate_whitelist.so"),
-    )
-    .unwrap();
-    svm.add_program(
+    // Fail loudly on a stale cross-program id instead of a ConstraintSeeds
+    // error deep inside the lock CPI.
+    assert_eq!(
+        marketplace::PROPERTY_PROGRAM,
         pid(),
-        include_bytes!("../../../../target/deploy/property.so"),
-    )
-    .unwrap();
-    svm.add_program(
-        mid(),
-        include_bytes!("../../../../target/deploy/marketplace.so"),
-    )
-    .unwrap();
+        "marketplace::PROPERTY_PROGRAM is stale, update it after `anchor keys sync`"
+    );
+    let mut svm = LiteSVM::new();
+    svm.add_program(roles_id(), &program_bytes("xcavate_whitelist"))
+        .unwrap();
+    svm.add_program(pid(), &program_bytes("property")).unwrap();
+    svm.add_program(mid(), &program_bytes("marketplace"))
+        .unwrap();
     set_mint(&mut svm);
 
     let authority = funded(&mut svm);

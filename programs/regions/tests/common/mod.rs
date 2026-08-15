@@ -608,21 +608,25 @@ pub fn warp_past_voting(svm: &mut LiteSVM) {
     svm.set_sysvar(&clock);
 }
 
+// Reads a program binary from target/deploy at runtime rather than via
+// include_bytes!, so the test crates compile on a fresh clone where the .so
+// files don't exist yet (anchor's IDL pass compiles tests too).
+pub fn program_bytes(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/deploy")
+        .join(format!("{name}.so"));
+    std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("{} missing, run `anchor build` first", path.display()))
+}
+
 // Loads both programs, seeds the XCAV mint, wires up a compliant
 // RegionalOperator (with XCAV), and initializes the regions config. Returns
 // (svm, operator, authority).
 pub fn setup() -> (LiteSVM, Keypair, Keypair) {
     let mut svm = LiteSVM::new();
-    svm.add_program(
-        roles_id(),
-        include_bytes!("../../../../target/deploy/xcavate_whitelist.so"),
-    )
-    .unwrap();
-    svm.add_program(
-        rid(),
-        include_bytes!("../../../../target/deploy/regions.so"),
-    )
-    .unwrap();
+    svm.add_program(roles_id(), &program_bytes("xcavate_whitelist"))
+        .unwrap();
+    svm.add_program(rid(), &program_bytes("regions")).unwrap();
     set_mint(&mut svm);
 
     let authority = funded(&mut svm);

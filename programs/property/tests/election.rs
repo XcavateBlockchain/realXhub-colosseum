@@ -231,12 +231,18 @@ fn revote_moves_the_power() {
         &[&holder, &sponsor],
     );
     assert_eq!(candidacy_of(&svm, ASSET, 1, &first.pubkey()).vote_power, 0);
-    assert_eq!(candidacy_of(&svm, ASSET, 1, &second.pubkey()).vote_power, 25);
+    assert_eq!(
+        candidacy_of(&svm, ASSET, 1, &second.pubkey()).vote_power,
+        25
+    );
     assert_eq!(holding_of(&svm, ASSET, &holder.pubkey()).locked_amount, 25);
 
     // Same candidate again: no previous account rides along.
     vote(&mut svm, &holder, 1, &second.pubkey(), 30);
-    assert_eq!(candidacy_of(&svm, ASSET, 1, &second.pubkey()).vote_power, 30);
+    assert_eq!(
+        candidacy_of(&svm, ASSET, 1, &second.pubkey()).vote_power,
+        30
+    );
     assert_eq!(holding_of(&svm, ASSET, &holder.pubkey()).locked_amount, 30);
 }
 
@@ -613,7 +619,13 @@ fn close_candidacy_waits_for_the_round_to_settle() {
     let cranker = funded(&mut svm);
     fails_with(
         &mut svm,
-        close_candidacy_ix(&cranker.pubkey(), &agent.pubkey(), ASSET, 1, &agent.pubkey()),
+        close_candidacy_ix(
+            &cranker.pubkey(),
+            &agent.pubkey(),
+            ASSET,
+            1,
+            &agent.pubkey(),
+        ),
         &cranker,
         &[&cranker],
         "VotingStillOngoing",
@@ -628,7 +640,13 @@ fn close_candidacy_waits_for_the_round_to_settle() {
     );
     ok(
         &mut svm,
-        close_candidacy_ix(&cranker.pubkey(), &agent.pubkey(), ASSET, 1, &agent.pubkey()),
+        close_candidacy_ix(
+            &cranker.pubkey(),
+            &agent.pubkey(),
+            ASSET,
+            1,
+            &agent.pubkey(),
+        ),
         &cranker,
         &[&cranker],
     );

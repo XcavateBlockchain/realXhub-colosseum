@@ -461,7 +461,9 @@ fn settle_dead_listing_exit(
     }
     let mint_decimals = {
         let data = ctx.accounts.payment_mint.try_borrow_data()?;
-        StateWithExtensions::<MintState>::unpack(&data)?.base.decimals
+        StateWithExtensions::<MintState>::unpack(&data)?
+            .base
+            .decimals
     };
     transfer_checked(
         CpiContext::new_with_signer(

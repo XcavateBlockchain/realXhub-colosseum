@@ -9,7 +9,7 @@ pub use constants::*;
 pub use instructions::*;
 pub use state::*;
 
-declare_id!("2vVARM46pPD4rcHdbXHnYA4vTGN14q6skQAzsQWcHUxn");
+declare_id!("7TrzjKpdrEhnfhxuw8tWdH1sjxadazscsG5HXCDPLmaY");
 
 /// Roles and compliance registry for the realXmarket protocol.
 ///

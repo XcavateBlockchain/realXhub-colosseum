@@ -85,7 +85,12 @@ fn assignment_blocks_leaving_the_location() {
 #[test]
 fn resign_files_a_notice() {
     let (mut svm, _admin, agent) = setup_with_assigned_agent();
-    ok(&mut svm, resign_ix(&agent.pubkey(), ASSET), &agent, &[&agent]);
+    ok(
+        &mut svm,
+        resign_ix(&agent.pubkey(), ASSET),
+        &agent,
+        &[&agent],
+    );
 
     let notice = notice_of(&svm, ASSET);
     assert_eq!(notice.agent, agent.pubkey());
@@ -118,7 +123,12 @@ fn resign_is_for_the_assigned_agent_only() {
 #[test]
 fn finalize_waits_out_the_notice_period() {
     let (mut svm, _admin, agent) = setup_with_assigned_agent();
-    ok(&mut svm, resign_ix(&agent.pubkey(), ASSET), &agent, &[&agent]);
+    ok(
+        &mut svm,
+        resign_ix(&agent.pubkey(), ASSET),
+        &agent,
+        &[&agent],
+    );
 
     let cranker = funded(&mut svm);
     fails_with(
@@ -138,7 +148,10 @@ fn finalize_waits_out_the_notice_period() {
     );
 
     assert_eq!(letting_of(&svm, ASSET).agent, Pubkey::default());
-    assert_eq!(agent_of(&svm, &agent.pubkey()).locations[0].assigned_count, 0);
+    assert_eq!(
+        agent_of(&svm, &agent.pubkey()).locations[0].assigned_count,
+        0
+    );
     assert!(account_gone(&svm, &resignation_pda(ASSET)));
     // With the assignment released, the agent can leave the location again.
     ok(
@@ -152,7 +165,12 @@ fn finalize_waits_out_the_notice_period() {
 #[test]
 fn seat_reopens_for_a_fresh_election_after_resignation() {
     let (mut svm, admin, agent) = setup_with_assigned_agent();
-    ok(&mut svm, resign_ix(&agent.pubkey(), ASSET), &agent, &[&agent]);
+    ok(
+        &mut svm,
+        resign_ix(&agent.pubkey(), ASSET),
+        &agent,
+        &[&agent],
+    );
     warp(&mut svm, NOTICE_PERIOD + 1);
     let cranker = funded(&mut svm);
     ok(

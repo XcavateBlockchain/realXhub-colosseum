@@ -175,10 +175,16 @@ fn check_invariants(
         }
     }
 
-    // Case counts mirror the assignments exactly.
+    // Case counts mirror the assignments exactly, except after settlement:
+    // execute_deal releases both cases and keeps the assignments on the
+    // listing only as the record of who settled the sale.
     for lawyer in [dl, sl] {
-        let expected = u32::from(listing.developer_lawyer.lawyer == *lawyer)
-            + u32::from(listing.spv_lawyer.lawyer == *lawyer);
+        let expected = if listing.status == ListingStatus::Finalized {
+            0
+        } else {
+            u32::from(listing.developer_lawyer.lawyer == *lawyer)
+                + u32::from(listing.spv_lawyer.lawyer == *lawyer)
+        };
         prop_assert_eq!(lawyer_of(svm, lawyer).active_cases, expected);
     }
 

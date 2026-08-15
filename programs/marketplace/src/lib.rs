@@ -18,7 +18,7 @@ pub use instructions::ConfigParams;
 
 use instructions::*;
 
-declare_id!("B6YRVAmjmhN28smZxNfCnuKc19CamBbAEMXsp5KTfWog");
+declare_id!("dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T");
 
 #[program]
 pub mod marketplace {

@@ -1842,21 +1842,26 @@ pub fn warp(svm: &mut LiteSVM, secs: i64) {
     svm.set_sysvar(&clock);
 }
 
+// Reads a program binary from target/deploy at runtime rather than via
+// include_bytes!, so the test crates compile on a fresh clone where the .so
+// files don't exist yet (anchor's IDL pass compiles tests too).
+pub fn program_bytes(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/deploy")
+        .join(format!("{name}.so"));
+    std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("{} missing, run `anchor build` first", path.display()))
+}
+
 // Loads the roles and marketplace programs, seeds the XCAV mint, initializes
 // both configs, and returns (svm, admin, authority). The admin can hand out
 // roles.
 pub fn setup() -> (LiteSVM, Keypair, Keypair) {
     let mut svm = LiteSVM::new();
-    svm.add_program(
-        roles_id(),
-        include_bytes!("../../../../target/deploy/xcavate_whitelist.so"),
-    )
-    .unwrap();
-    svm.add_program(
-        mid(),
-        include_bytes!("../../../../target/deploy/marketplace.so"),
-    )
-    .unwrap();
+    svm.add_program(roles_id(), &program_bytes("xcavate_whitelist"))
+        .unwrap();
+    svm.add_program(mid(), &program_bytes("marketplace"))
+        .unwrap();
     set_mint(&mut svm);
     // The treasury's XCAV account, where the abandonment slash lands.
     set_token_account_for(
