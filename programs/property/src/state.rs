@@ -176,11 +176,11 @@ pub struct IncomeStream {
     pub dust: u64,
 }
 
-/// A property's rental income ledger, one stream per payment mint. Substrate
-/// keeps a single accumulator and substitutes assets 1:1 at payout; the
-/// streams stay separate here because the mints differ in decimals. The
-/// funds sit in the income vault's token accounts, apart from every other
-/// pot, so nothing else can spend money already owed to holders.
+/// A property's rental income ledger, one stream per payment mint. The
+/// streams never mix: the mints differ in decimals, so one shared
+/// accumulator would misprice payouts across them. The funds sit in the
+/// income vault's token accounts, apart from every other pot, so nothing
+/// else can spend money already owed to holders.
 #[account]
 #[derive(InitSpace)]
 pub struct PropertyIncome {

@@ -343,8 +343,7 @@ pub const MAX_PAYMENT_DECIMALS: u8 = 12;
 
 /// Why shares are locked. Each reason keeps its own counter on the holding
 /// and the effective lock is the largest of them, so backing one vote never
-/// spends weight another kind of vote could still use. Same semantics as
-/// Substrate's per-reason freezes.
+/// spends weight another kind of vote could still use.
 #[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LockReason {
     LawyerElection,
@@ -410,7 +409,33 @@ pub struct ShareListing {
     /// Marketplace fee at the moment of listing, so a config change can't
     /// reprice the seller's proceeds under them.
     pub fee_bps: u16,
+    /// Stamped on each offer against this listing; the seller accepts by
+    /// nonce, so an offer can't be swapped under their signature.
+    pub next_offer_nonce: u64,
     /// The wallet that fronted the account's rent; refunded at close.
+    pub rent_payer: Pubkey,
+    pub bump: u8,
+}
+
+/// A bid below (or above) a share listing's asking price, one per bidder
+/// per listing. The bid money sits in the offer's own vault from make to
+/// settle, so an accepted offer can always pay.
+#[account]
+#[derive(InitSpace)]
+pub struct Offer {
+    /// The share listing this bids on.
+    pub listing_id: u64,
+    pub asset_id: u64,
+    pub offeror: Pubkey,
+    /// Offered price per share, in quote units.
+    pub share_price: u64,
+    pub amount: u32,
+    pub payment_mint: Pubkey,
+    /// What the vault holds, in the mint's units; paid out or refunded in
+    /// full, exactly once.
+    pub held: u64,
+    pub nonce: u64,
+    /// The wallet that fronted the offer's rent; refunded at close.
     pub rent_payer: Pubkey,
     pub bump: u8,
 }

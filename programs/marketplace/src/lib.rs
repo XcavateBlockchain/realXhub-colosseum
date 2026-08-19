@@ -275,6 +275,39 @@ pub mod marketplace {
         secondary::close_share_holding_handler(ctx)
     }
 
+    pub fn make_offer(
+        ctx: Context<MakeOffer>,
+        id: u64,
+        amount: u32,
+        share_price: u64,
+    ) -> Result<()> {
+        offers::make_offer_handler(ctx, id, amount, share_price)
+    }
+
+    pub fn accept_offer<'info>(
+        ctx: Context<'info, AcceptOffer<'info>>,
+        id: u64,
+        nonce: u64,
+    ) -> Result<()> {
+        offers::accept_offer_handler(ctx, id, nonce)
+    }
+
+    pub fn reject_offer(ctx: Context<RejectOffer>, id: u64, nonce: u64) -> Result<()> {
+        offers::reject_offer_handler(ctx, id, nonce)
+    }
+
+    pub fn cancel_offer(ctx: Context<CancelOffer>) -> Result<()> {
+        offers::cancel_offer_handler(ctx)
+    }
+
+    pub fn send_property_shares<'info>(
+        ctx: Context<'info, SendShares<'info>>,
+        asset_id: u64,
+        amount: u32,
+    ) -> Result<()> {
+        secondary::send_property_shares_handler(ctx, asset_id, amount)
+    }
+
     pub fn lock_shares(
         ctx: Context<AdjustShareLock>,
         asset_id: u64,

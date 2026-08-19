@@ -234,4 +234,10 @@ pub enum MarketplaceError {
     /// The holding still carries shares, locks, or an open listing.
     #[msg("Holding is not empty")]
     HoldingNotEmpty,
+    /// The offer changed since the seller looked at it.
+    #[msg("Offer nonce does not match")]
+    OfferNonceMismatch,
+    /// Only the offer's maker may act on it.
+    #[msg("Caller did not make this offer")]
+    WrongOfferor,
 }

@@ -56,3 +56,9 @@ pub const INCOME_SEED: &[u8] = b"income";
 
 #[constant]
 pub const SHARE_LISTING_SEED: &[u8] = b"share-listing";
+
+#[constant]
+pub const OFFER_SEED: &[u8] = b"offer";
+
+#[constant]
+pub const OFFER_VAULT_SEED: &[u8] = b"offer-vault";

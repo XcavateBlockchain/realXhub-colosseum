@@ -35,7 +35,7 @@ pub const SETTLE_INCOME_DISC: [u8; 8] = [228, 147, 202, 250, 235, 75, 170, 119];
 /// against its own seeds; this side only signs with the `cpi-auth` PDA that
 /// gates the instruction.
 #[allow(clippy::too_many_arguments)]
-fn settle_income<'info>(
+pub(crate) fn settle_income<'info>(
     property_program: &AccountInfo<'info>,
     cpi_auth: &AccountInfo<'info>,
     payer: &AccountInfo<'info>,
@@ -78,6 +78,76 @@ fn settle_income<'info>(
         &[seeds],
     )
     .map_err(Into::into)
+}
+
+/// Move shares between two wallets' Token-2022 accounts: create the
+/// destination if needed, thaw both ends, transfer with the permanent
+/// delegate signing, and freeze both again.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn move_shares<'info>(
+    share_token_program: &AccountInfo<'info>,
+    associated_token_program: &AccountInfo<'info>,
+    system_program: &AccountInfo<'info>,
+    payer: &AccountInfo<'info>,
+    share_mint: &AccountInfo<'info>,
+    mint_auth: &AccountInfo<'info>,
+    mint_auth_bump: u8,
+    asset_id: u64,
+    from_account: &AccountInfo<'info>,
+    to_account: &AccountInfo<'info>,
+    to_authority: &AccountInfo<'info>,
+    amount: u32,
+) -> Result<()> {
+    let id_bytes = asset_id.to_le_bytes();
+    let auth_seeds: &[&[u8]] = &[MINT_AUTH_SEED, &id_bytes, &[mint_auth_bump]];
+    create_idempotent(CpiContext::new(
+        associated_token_program.key(),
+        CreateAta {
+            payer: payer.clone(),
+            associated_token: to_account.clone(),
+            authority: to_authority.clone(),
+            mint: share_mint.clone(),
+            system_program: system_program.clone(),
+            token_program: share_token_program.clone(),
+        },
+    ))?;
+    for account in [from_account, to_account] {
+        thaw_account(CpiContext::new_with_signer(
+            share_token_program.key(),
+            ThawAccount {
+                account: account.clone(),
+                mint: share_mint.clone(),
+                authority: mint_auth.clone(),
+            },
+            &[auth_seeds],
+        ))?;
+    }
+    transfer_checked(
+        CpiContext::new_with_signer(
+            share_token_program.key(),
+            TransferChecked {
+                from: from_account.clone(),
+                mint: share_mint.clone(),
+                to: to_account.clone(),
+                authority: mint_auth.clone(),
+            },
+            &[auth_seeds],
+        ),
+        amount as u64,
+        0,
+    )?;
+    for account in [from_account, to_account] {
+        freeze_account(CpiContext::new_with_signer(
+            share_token_program.key(),
+            FreezeAccount {
+                account: account.clone(),
+                mint: share_mint.clone(),
+                authority: mint_auth.clone(),
+            },
+            &[auth_seeds],
+        ))?;
+    }
+    Ok(())
 }
 
 /// Put part of a holding up for sale on the secondary market. The shares
@@ -583,61 +653,20 @@ pub fn buy_relisted_shares_handler<'info>(
 
     // Shares through the usual airlock, this time seller to buyer with the
     // permanent delegate signing.
-    let id_bytes = asset_id.to_le_bytes();
-    let auth_seeds: &[&[u8]] = &[MINT_AUTH_SEED, &id_bytes, &[ctx.bumps.mint_auth]];
-    create_idempotent(CpiContext::new(
-        ctx.accounts.associated_token_program.key(),
-        CreateAta {
-            payer: ctx.accounts.payer.to_account_info(),
-            associated_token: ctx.accounts.buyer_share_account.to_account_info(),
-            authority: ctx.accounts.buyer.to_account_info(),
-            mint: ctx.accounts.share_mint.to_account_info(),
-            system_program: ctx.accounts.system_program.to_account_info(),
-            token_program: ctx.accounts.share_token_program.to_account_info(),
-        },
-    ))?;
-    for account in [
-        &ctx.accounts.seller_share_account,
-        &ctx.accounts.buyer_share_account,
-    ] {
-        thaw_account(CpiContext::new_with_signer(
-            ctx.accounts.share_token_program.key(),
-            ThawAccount {
-                account: account.to_account_info(),
-                mint: ctx.accounts.share_mint.to_account_info(),
-                authority: ctx.accounts.mint_auth.to_account_info(),
-            },
-            &[auth_seeds],
-        ))?;
-    }
-    transfer_checked(
-        CpiContext::new_with_signer(
-            ctx.accounts.share_token_program.key(),
-            TransferChecked {
-                from: ctx.accounts.seller_share_account.to_account_info(),
-                mint: ctx.accounts.share_mint.to_account_info(),
-                to: ctx.accounts.buyer_share_account.to_account_info(),
-                authority: ctx.accounts.mint_auth.to_account_info(),
-            },
-            &[auth_seeds],
-        ),
-        amount as u64,
-        0,
+    move_shares(
+        &ctx.accounts.share_token_program.to_account_info(),
+        &ctx.accounts.associated_token_program.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.payer.to_account_info(),
+        &ctx.accounts.share_mint.to_account_info(),
+        &ctx.accounts.mint_auth.to_account_info(),
+        ctx.bumps.mint_auth,
+        asset_id,
+        &ctx.accounts.seller_share_account.to_account_info(),
+        &ctx.accounts.buyer_share_account.to_account_info(),
+        &ctx.accounts.buyer.to_account_info(),
+        amount,
     )?;
-    for account in [
-        &ctx.accounts.seller_share_account,
-        &ctx.accounts.buyer_share_account,
-    ] {
-        freeze_account(CpiContext::new_with_signer(
-            ctx.accounts.share_token_program.key(),
-            FreezeAccount {
-                account: account.to_account_info(),
-                mint: ctx.accounts.share_mint.to_account_info(),
-                authority: ctx.accounts.mint_auth.to_account_info(),
-            },
-            &[auth_seeds],
-        ))?;
-    }
 
     // Ledger: the sold shares leave the seller's balance and their listing
     // reserve together, keeping the lock invariant intact.
@@ -677,6 +706,259 @@ pub fn buy_relisted_shares_handler<'info>(
         paid: total,
         fee,
         remaining,
+    });
+    Ok(())
+}
+
+/// Give shares away: a plain transfer between compliant investors, no
+/// money involved. Both parties' income settles at pre-transfer balances
+/// and the receiver is held to the ownership cap, exactly like a sale.
+#[derive(Accounts)]
+#[instruction(asset_id: u64)]
+pub struct SendShares<'info> {
+    pub sender: Signer<'info>,
+
+    /// Whoever fronts rent for accounts created along the way: the sponsor
+    /// on the default path, or any willing wallet.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    /// The sender's investor role, owned by the roles program; must be
+    /// compliant.
+    #[account(
+        seeds = [
+            xcavate_whitelist::ROLE_SEED,
+            sender.key().as_ref(),
+            &[Role::RealEstateInvestor.seed_byte()],
+        ],
+        bump = sender_role.bump,
+        seeds::program = xcavate_whitelist::ID,
+        constraint = sender_role.is_compliant() @ MarketplaceError::NotCompliant,
+    )]
+    pub sender_role: Box<Account<'info, RoleAccount>>,
+
+    /// CHECK: the receiving wallet; its role account below proves standing.
+    pub receiver: UncheckedAccount<'info>,
+
+    /// The receiver's investor role; shares only ever land with compliant
+    /// investors.
+    #[account(
+        seeds = [
+            xcavate_whitelist::ROLE_SEED,
+            receiver.key().as_ref(),
+            &[Role::RealEstateInvestor.seed_byte()],
+        ],
+        bump = receiver_role.bump,
+        seeds::program = xcavate_whitelist::ID,
+        constraint = receiver_role.is_compliant() @ MarketplaceError::NotCompliant,
+    )]
+    pub receiver_role: Box<Account<'info, RoleAccount>>,
+
+    /// CHECK: the primary listing (status gate and the ownership-cap
+    /// snapshot), seeds-pinned here and deserialized in the handler.
+    #[account(seeds = [LISTING_SEED, &asset_id.to_le_bytes()], bump)]
+    pub listing: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        seeds = [PROPERTY_SEED, &asset_id.to_le_bytes()],
+        bump = property.bump,
+    )]
+    pub property: Box<Account<'info, PropertyAsset>>,
+
+    #[account(
+        mut,
+        seeds = [SHARE_SEED, &asset_id.to_le_bytes(), sender.key().as_ref()],
+        bump = sender_holding.bump,
+    )]
+    pub sender_holding: Box<Account<'info, ShareHolding>>,
+
+    #[account(
+        init_if_needed,
+        payer = payer,
+        space = 8 + ShareHolding::INIT_SPACE,
+        seeds = [SHARE_SEED, &asset_id.to_le_bytes(), receiver.key().as_ref()],
+        bump,
+    )]
+    pub receiver_holding: Box<Account<'info, ShareHolding>>,
+
+    /// CHECK: the share mint PDA (owned by the Token-2022 program).
+    #[account(seeds = [SHARE_MINT_SEED, &asset_id.to_le_bytes()], bump)]
+    pub share_mint: UncheckedAccount<'info>,
+
+    /// CHECK: the share mint's authority PDA; permanent delegate.
+    #[account(seeds = [MINT_AUTH_SEED, &asset_id.to_le_bytes()], bump)]
+    pub mint_auth: UncheckedAccount<'info>,
+
+    /// CHECK: the sender's share account; the handler pins it to its
+    /// derivation.
+    #[account(mut)]
+    pub sender_share_account: UncheckedAccount<'info>,
+
+    /// CHECK: the receiver's associated share account; created
+    /// idempotently, so the ATA program verifies the derivation.
+    #[account(mut)]
+    pub receiver_share_account: UncheckedAccount<'info>,
+
+    /// CHECK: this program's CPI signer PDA; holds no data, only signs the
+    /// income settlements.
+    #[account(seeds = [CPI_AUTH_SEED], bump)]
+    pub cpi_auth: UncheckedAccount<'info>,
+
+    /// CHECK: the property's income ledger; the handler pins it to its
+    /// derivation under the property program.
+    pub income: UncheckedAccount<'info>,
+
+    /// CHECK: the sender's income checkpoint; verified by the property
+    /// program.
+    #[account(mut)]
+    pub sender_checkpoint: UncheckedAccount<'info>,
+
+    /// CHECK: the receiver's income checkpoint; verified by the property
+    /// program.
+    #[account(mut)]
+    pub receiver_checkpoint: UncheckedAccount<'info>,
+
+    /// CHECK: the property program the settlements CPI into, pinned by
+    /// address.
+    #[account(address = PROPERTY_PROGRAM @ MarketplaceError::WrongPayee)]
+    pub property_program: UncheckedAccount<'info>,
+
+    pub share_token_program: Program<'info, Token2022>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
+pub fn send_property_shares_handler<'info>(
+    ctx: Context<'info, SendShares<'info>>,
+    asset_id: u64,
+    amount: u32,
+) -> Result<()> {
+    // Transfers wait for the settlement: the refund paths before it
+    // reconcile positions against holdings, and a transfer would wedge
+    // them.
+    let primary: Account<Listing> = Account::try_from(&ctx.accounts.listing)?;
+    require!(
+        primary.status == ListingStatus::Finalized,
+        MarketplaceError::PropertyNotFinalized
+    );
+    require!(amount > 0, MarketplaceError::InvalidShareAmount);
+    require!(
+        amount <= ctx.accounts.sender_holding.transferable(),
+        MarketplaceError::NotEnoughShares
+    );
+    require!(
+        ctx.accounts.sender_share_account.key()
+            == get_associated_token_address_with_program_id(
+                &ctx.accounts.sender.key(),
+                &ctx.accounts.share_mint.key(),
+                &ctx.accounts.share_token_program.key(),
+            ),
+        MarketplaceError::WrongVaultAccount
+    );
+    require!(
+        ctx.accounts.income.key()
+            == Pubkey::find_program_address(
+                &[INCOME_SEED, &asset_id.to_le_bytes()],
+                &PROPERTY_PROGRAM
+            )
+            .0,
+        MarketplaceError::WrongVaultAccount
+    );
+
+    let owned_after = (ctx.accounts.receiver_holding.amount as u64)
+        .checked_add(amount as u64)
+        .ok_or(MarketplaceError::Overflow)?;
+    let max_shares = (primary.max_ownership_bps as u64)
+        .checked_mul(ctx.accounts.property.share_amount as u64)
+        .ok_or(MarketplaceError::Overflow)?
+        / 10_000;
+    require!(
+        owned_after < max_shares,
+        MarketplaceError::MaxOwnershipExceeded
+    );
+
+    let sender_key = ctx.accounts.sender.key();
+    let receiver_key = ctx.accounts.receiver.key();
+
+    // A first-time receiver's holding was created just now, so its
+    // zero-share state must be flushed for the settlement CPI to read.
+    let receiver_holding = &mut ctx.accounts.receiver_holding;
+    if receiver_holding.owner == Pubkey::default() {
+        receiver_holding.asset_id = asset_id;
+        receiver_holding.owner = receiver_key;
+        receiver_holding.locks = [0; LOCK_REASONS];
+        receiver_holding.listed = 0;
+        receiver_holding.bump = ctx.bumps.receiver_holding;
+        ctx.accounts.property.holder_count = ctx
+            .accounts
+            .property
+            .holder_count
+            .checked_add(1)
+            .ok_or(MarketplaceError::Overflow)?;
+        ctx.accounts.receiver_holding.exit(&crate::ID)?;
+    }
+
+    // Both parties settle their accrued income at pre-transfer balances;
+    // see `buy_relisted_shares` for the skip rule.
+    if !ctx.accounts.income.data_is_empty() {
+        settle_income(
+            &ctx.accounts.property_program.to_account_info(),
+            &ctx.accounts.cpi_auth.to_account_info(),
+            &ctx.accounts.payer.to_account_info(),
+            &ctx.accounts.income.to_account_info(),
+            &ctx.accounts.sender_holding.to_account_info(),
+            &ctx.accounts.sender_checkpoint.to_account_info(),
+            &ctx.accounts.system_program.to_account_info(),
+            ctx.bumps.cpi_auth,
+            asset_id,
+            sender_key,
+        )?;
+        settle_income(
+            &ctx.accounts.property_program.to_account_info(),
+            &ctx.accounts.cpi_auth.to_account_info(),
+            &ctx.accounts.payer.to_account_info(),
+            &ctx.accounts.income.to_account_info(),
+            &ctx.accounts.receiver_holding.to_account_info(),
+            &ctx.accounts.receiver_checkpoint.to_account_info(),
+            &ctx.accounts.system_program.to_account_info(),
+            ctx.bumps.cpi_auth,
+            asset_id,
+            receiver_key,
+        )?;
+    }
+
+    move_shares(
+        &ctx.accounts.share_token_program.to_account_info(),
+        &ctx.accounts.associated_token_program.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.payer.to_account_info(),
+        &ctx.accounts.share_mint.to_account_info(),
+        &ctx.accounts.mint_auth.to_account_info(),
+        ctx.bumps.mint_auth,
+        asset_id,
+        &ctx.accounts.sender_share_account.to_account_info(),
+        &ctx.accounts.receiver_share_account.to_account_info(),
+        &ctx.accounts.receiver.to_account_info(),
+        amount,
+    )?;
+
+    let sender_holding = &mut ctx.accounts.sender_holding;
+    sender_holding.amount = sender_holding
+        .amount
+        .checked_sub(amount)
+        .ok_or(MarketplaceError::Overflow)?;
+    let receiver_holding = &mut ctx.accounts.receiver_holding;
+    receiver_holding.amount = receiver_holding
+        .amount
+        .checked_add(amount)
+        .ok_or(MarketplaceError::Overflow)?;
+
+    emit!(PropertySharesSent {
+        asset_id,
+        sender: sender_key,
+        receiver: receiver_key,
+        amount,
     });
     Ok(())
 }
@@ -765,6 +1047,14 @@ pub struct RelistedSharesBought {
     pub paid: u64,
     pub fee: u64,
     pub remaining: u32,
+}
+
+#[event]
+pub struct PropertySharesSent {
+    pub asset_id: u64,
+    pub sender: Pubkey,
+    pub receiver: Pubkey,
+    pub amount: u32,
 }
 
 #[event]

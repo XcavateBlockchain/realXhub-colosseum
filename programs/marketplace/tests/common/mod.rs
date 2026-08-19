@@ -14,6 +14,7 @@ pub use anchor_lang::solana_program::clock::Clock;
 pub use anchor_lang::AccountDeserialize;
 pub use litesvm::LiteSVM;
 pub use marketplace::state::Config as MarketplaceConfig;
+pub use marketplace::state::ListingStatus;
 pub use solana_keypair::Keypair;
 pub use solana_signer::Signer;
 pub use xcavate_whitelist::state::Role;
@@ -2073,4 +2074,401 @@ pub fn token_balance(svm: &LiteSVM, address: &Pubkey) -> u64 {
         .unwrap()
         .base
         .amount
+}
+
+// --- finalized-property fixture (secondary market) ---
+
+pub const COSTS: u64 = 1_000_000_000;
+pub const DOCS: [u8; 32] = [7u8; 32];
+
+/// (shares, pays in gbp6) per investor; a mixed-mint sellout of 100.
+pub const BUYS: [(u32, bool); 4] = [(34, false), (33, false), (24, true), (9, true)];
+
+/// A settled, finalized property. Investors hold 34/33/24/9; the first one
+/// still carries their 34-share lawyer-election lock.
+pub fn finalized_property() -> (LiteSVM, Keypair, Vec<Keypair>) {
+    build_property(true)
+}
+
+/// Same flow; `finalize` false stops at `Legal`, holders already claimed.
+pub fn build_property(finalize: bool) -> (LiteSVM, Keypair, Vec<Keypair>) {
+    let (mut svm, admin, _authority) = setup();
+    let operator = funded(&mut svm);
+    seed_region(&mut svm, 1, &operator.pubkey());
+    seed_location(&mut svm, 1, POSTCODE);
+    let developer = new_developer(&mut svm, &admin);
+    ok(
+        &mut svm,
+        list_ix(&developer.pubkey(), 0),
+        &developer,
+        &[&developer],
+    );
+    ok(
+        &mut svm,
+        init_assets_ix(&developer.pubkey(), 0),
+        &developer,
+        &[&developer],
+    );
+
+    let spn = sponsor();
+    let investors: Vec<Keypair> = (0..4).map(|_| new_investor(&mut svm, &admin)).collect();
+    for (investor, (shares, gbp6)) in investors.iter().zip(BUYS) {
+        let ix = if gbp6 {
+            give_gbp6(&mut svm, &investor.pubkey(), 1_000_000_000);
+            reserve_ix_with_mint(
+                &investor.pubkey(),
+                &spn.pubkey(),
+                0,
+                shares,
+                u64::MAX,
+                gbp6_mint(),
+                gbp6_acc(&investor.pubkey()),
+            )
+        } else {
+            reserve_ix(&investor.pubkey(), &spn.pubkey(), 0, shares, u64::MAX)
+        };
+        ok(&mut svm, ix, &spn, &[&spn, investor]);
+    }
+    let confirmer = new_confirmer(&mut svm, &admin);
+    ok(
+        &mut svm,
+        create_spv_ix(&confirmer.pubkey(), 0),
+        &confirmer,
+        &[&confirmer],
+    );
+    for (investor, (_, gbp6)) in investors.iter().zip(BUYS) {
+        let ix = if gbp6 {
+            claim_ix_with_mint(
+                &investor.pubkey(),
+                &spn.pubkey(),
+                0,
+                gbp6_mint(),
+                gbp6_acc(&investor.pubkey()),
+                payment_ata(&listing_vault_pda(0), &gbp6_mint()),
+            )
+        } else {
+            claim_ix(&investor.pubkey(), &spn.pubkey(), 0)
+        };
+        ok(&mut svm, ix, &spn, &[&spn, investor]);
+    }
+
+    let dl = new_registered_lawyer(&mut svm, &admin, 1);
+    ok(
+        &mut svm,
+        assign_dev_lawyer_ix(&developer.pubkey(), 0, &dl.pubkey()),
+        &developer,
+        &[&developer],
+    );
+    let sl = new_registered_lawyer(&mut svm, &admin, 1);
+    ok(
+        &mut svm,
+        claim_spv_ix(&sl.pubkey(), 0, 1, COSTS),
+        &sl,
+        &[&sl, &spn],
+    );
+    ok(
+        &mut svm,
+        vote_spv_ix(&investors[0].pubkey(), 0, 1, &sl.pubkey(), None, 34),
+        &spn,
+        &[&spn, &investors[0]],
+    );
+    warp(&mut svm, 10_001);
+    ok(
+        &mut svm,
+        finalize_spv_ix(&operator.pubkey(), 0, 1, Some(&sl.pubkey()), &[sl.pubkey()]),
+        &operator,
+        &[&operator],
+    );
+    for lawyer in [&dl, &sl] {
+        ok(
+            &mut svm,
+            confirm_docs_ix(&lawyer.pubkey(), 0, true, DOCS),
+            lawyer,
+            &[lawyer],
+        );
+    }
+
+    for wallet in [
+        &developer.pubkey(),
+        &dl.pubkey(),
+        &sl.pubkey(),
+        &operator.pubkey(),
+    ] {
+        give_tgbp(&mut svm, wallet, 0);
+        give_gbp6(&mut svm, wallet, 0);
+    }
+    set_token_account_for(
+        &mut svm,
+        tgbp_mint(),
+        treasury_payment_ata(),
+        &treasury(),
+        0,
+    );
+    set_token_account_for(
+        &mut svm,
+        gbp6_mint(),
+        payment_ata(&treasury(), &gbp6_mint()),
+        &treasury(),
+        0,
+    );
+    if finalize {
+        let cranker = funded(&mut svm);
+        ok(
+            &mut svm,
+            execute_deal_ix(
+                &cranker.pubkey(),
+                0,
+                1,
+                &developer.pubkey(),
+                &dl.pubkey(),
+                &sl.pubkey(),
+                &operator.pubkey(),
+                &[tgbp_mint(), gbp6_mint()],
+            ),
+            &cranker,
+            &[&cranker],
+        );
+        assert_eq!(listing_of(&svm, 0).status, ListingStatus::Finalized);
+    }
+    (svm, admin, investors)
+}
+
+// --- offers ---
+
+pub fn offer_pda(listing_id: u64, offeror: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            marketplace::OFFER_SEED,
+            &listing_id.to_le_bytes(),
+            offeror.as_ref(),
+        ],
+        &mid(),
+    )
+    .0
+}
+pub fn offer_vault_pda(listing_id: u64, offeror: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            marketplace::OFFER_VAULT_SEED,
+            &listing_id.to_le_bytes(),
+            offeror.as_ref(),
+        ],
+        &mid(),
+    )
+    .0
+}
+pub fn offer_of(svm: &LiteSVM, listing_id: u64, offeror: &Pubkey) -> marketplace::state::Offer {
+    let acc = svm.get_account(&offer_pda(listing_id, offeror)).unwrap();
+    marketplace::state::Offer::try_deserialize(&mut acc.data.as_slice()).unwrap()
+}
+
+pub fn make_offer_ix(
+    offeror: &Pubkey,
+    id: u64,
+    amount: u32,
+    share_price: u64,
+    payment_mint: Pubkey,
+    offeror_payment: Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::MakeOffer {
+            id,
+            amount,
+            share_price,
+        }
+        .data(),
+        marketplace::accounts::MakeOffer {
+            offeror: *offeror,
+            payer: *offeror,
+            offeror_role: role_pda(offeror, Role::RealEstateInvestor),
+            config: marketplace_config(),
+            share_listing: share_listing_pda(id),
+            offer: offer_pda(id, offeror),
+            offer_vault: offer_vault_pda(id, offeror),
+            payment_mint,
+            offeror_payment,
+            vault_payment_account: payment_ata(&offer_vault_pda(id, offeror), &payment_mint),
+            payment_token_program: TOKEN_PROGRAM_ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn accept_offer_ix(
+    seller: &Pubkey,
+    asset_id: u64,
+    id: u64,
+    offeror: &Pubkey,
+    nonce: u64,
+    payment_mint: Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::AcceptOffer { id, nonce }.data(),
+        marketplace::accounts::AcceptOffer {
+            seller: *seller,
+            payer: *seller,
+            seller_role: role_pda(seller, Role::RealEstateInvestor),
+            config: marketplace_config(),
+            listing: listing_pda(asset_id),
+            property: property_pda(asset_id),
+            share_listing: share_listing_pda(id),
+            listing_rent_payer: *seller,
+            offeror: *offeror,
+            offer: offer_pda(id, offeror),
+            offer_rent_payer: *offeror,
+            seller_holding: holding_pda(asset_id, seller),
+            offeror_holding: holding_pda(asset_id, offeror),
+            payment_mint,
+            offer_vault: offer_vault_pda(id, offeror),
+            vault_payment_account: payment_ata(&offer_vault_pda(id, offeror), &payment_mint),
+            seller_payment: payment_ata(seller, &payment_mint),
+            treasury: treasury(),
+            treasury_payment: payment_ata(&treasury(), &payment_mint),
+            share_mint: share_mint_pda(asset_id),
+            mint_auth: mint_auth_pda(asset_id),
+            seller_share_account: investor_share_ata(asset_id, seller),
+            offeror_share_account: investor_share_ata(asset_id, offeror),
+            cpi_auth: marketplace_cpi_auth(),
+            income: property_income_pda(asset_id),
+            seller_checkpoint: property_checkpoint_pda(asset_id, seller),
+            offeror_checkpoint: property_checkpoint_pda(asset_id, offeror),
+            property_program: marketplace::PROPERTY_PROGRAM,
+            payment_token_program: TOKEN_PROGRAM_ID,
+            share_token_program: anchor_spl::token_2022::ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn reject_offer_ix(
+    seller: &Pubkey,
+    id: u64,
+    offeror: &Pubkey,
+    nonce: u64,
+    payment_mint: Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::RejectOffer { id, nonce }.data(),
+        marketplace::accounts::RejectOffer {
+            seller: *seller,
+            payer: *seller,
+            share_listing: share_listing_pda(id),
+            offeror: *offeror,
+            offer: offer_pda(id, offeror),
+            offer_rent_payer: *offeror,
+            payment_mint,
+            offer_vault: offer_vault_pda(id, offeror),
+            vault_payment_account: payment_ata(&offer_vault_pda(id, offeror), &payment_mint),
+            offeror_payment: payment_ata(offeror, &payment_mint),
+            payment_token_program: TOKEN_PROGRAM_ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn cancel_offer_ix(offeror: &Pubkey, id: u64, payment_mint: Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::CancelOffer {}.data(),
+        marketplace::accounts::CancelOffer {
+            offeror: *offeror,
+            payer: *offeror,
+            offer: offer_pda(id, offeror),
+            offer_rent_payer: *offeror,
+            payment_mint,
+            offer_vault: offer_vault_pda(id, offeror),
+            vault_payment_account: payment_ata(&offer_vault_pda(id, offeror), &payment_mint),
+            offeror_payment: payment_ata(offeror, &payment_mint),
+            payment_token_program: TOKEN_PROGRAM_ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn send_shares_ix(
+    sender: &Pubkey,
+    receiver: &Pubkey,
+    asset_id: u64,
+    amount: u32,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::SendPropertyShares { asset_id, amount }.data(),
+        marketplace::accounts::SendShares {
+            sender: *sender,
+            payer: *sender,
+            sender_role: role_pda(sender, Role::RealEstateInvestor),
+            receiver: *receiver,
+            receiver_role: role_pda(receiver, Role::RealEstateInvestor),
+            listing: listing_pda(asset_id),
+            property: property_pda(asset_id),
+            sender_holding: holding_pda(asset_id, sender),
+            receiver_holding: holding_pda(asset_id, receiver),
+            share_mint: share_mint_pda(asset_id),
+            mint_auth: mint_auth_pda(asset_id),
+            sender_share_account: investor_share_ata(asset_id, sender),
+            receiver_share_account: investor_share_ata(asset_id, receiver),
+            cpi_auth: marketplace_cpi_auth(),
+            income: property_income_pda(asset_id),
+            sender_checkpoint: property_checkpoint_pda(asset_id, sender),
+            receiver_checkpoint: property_checkpoint_pda(asset_id, receiver),
+            property_program: marketplace::PROPERTY_PROGRAM,
+            share_token_program: anchor_spl::token_2022::ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+// --- property-program income seeding (settlement CPI tests) ---
+
+/// Write the property program's income ledger with one tGBP stream that has
+/// accrued `per_share` per share, so settlements have something to bank.
+pub fn seed_income_stream(svm: &mut LiteSVM, per_share: u128) {
+    let income = property::state::PropertyIncome {
+        asset_id: 0,
+        streams: vec![property::state::IncomeStream {
+            mint: tgbp_mint(),
+            per_share,
+            dust: 0,
+        }],
+        rent_payer: Pubkey::new_unique(),
+        bump: Pubkey::find_program_address(
+            &[b"income", &0u64.to_le_bytes()],
+            &marketplace::PROPERTY_PROGRAM,
+        )
+        .1,
+    };
+    use anchor_lang::AnchorSerialize;
+    let mut data =
+        <property::state::PropertyIncome as anchor_lang::Discriminator>::DISCRIMINATOR.to_vec();
+    income.serialize(&mut data).unwrap();
+    svm.set_account(
+        property_income_pda(0),
+        Account {
+            lamports: 100_000_000,
+            data,
+            owner: marketplace::PROPERTY_PROGRAM,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
+
+pub fn checkpoint_of(svm: &LiteSVM, owner: &Pubkey) -> property::state::IncomeCheckpoint {
+    let acc = svm.get_account(&property_checkpoint_pda(0, owner)).unwrap();
+    property::state::IncomeCheckpoint::try_deserialize(&mut acc.data.as_slice()).unwrap()
 }
