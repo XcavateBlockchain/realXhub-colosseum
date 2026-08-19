@@ -1,0 +1,774 @@
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
+use anchor_lang::solana_program::program::invoke_signed;
+use anchor_lang::AccountsExit;
+use anchor_spl::associated_token::{
+    create_idempotent, get_associated_token_address_with_program_id, AssociatedToken,
+    Create as CreateAta,
+};
+use anchor_spl::token_2022::spl_token_2022::{
+    extension::StateWithExtensions, state::Mint as MintState,
+};
+use anchor_spl::token_2022::{freeze_account, thaw_account, FreezeAccount, ThawAccount, Token2022};
+use anchor_spl::token_interface::{transfer_checked, TokenInterface, TransferChecked};
+
+use crate::constants::{
+    CONFIG_SEED, CPI_AUTH_SEED, INCOME_SEED, LISTING_SEED, MINT_AUTH_SEED, PROPERTY_PROGRAM,
+    PROPERTY_SEED, SHARE_LISTING_SEED, SHARE_MINT_SEED, SHARE_SEED,
+};
+use crate::error::MarketplaceError;
+use crate::instructions::buy::{bps_of, scale_to_mint};
+use crate::state::{
+    Config, Listing, ListingStatus, PropertyAsset, ShareHolding, ShareListing, LOCK_REASONS,
+    MIN_PAYMENT_DECIMALS, PRICE_DECIMALS,
+};
+
+use xcavate_whitelist::state::{Role, RoleAccount};
+
+/// Anchor discriminator of the property program's `settle_income`. Built by
+/// hand because the crate dependency runs the other way (property depends
+/// on this program), so the CPI can't use the generated client.
+pub const SETTLE_INCOME_DISC: [u8; 8] = [228, 147, 202, 250, 235, 75, 170, 119];
+
+/// Checkpoint a holder's accrued income at their current balance, before
+/// the transfer changes it. The property program verifies every account
+/// against its own seeds; this side only signs with the `cpi-auth` PDA that
+/// gates the instruction.
+#[allow(clippy::too_many_arguments)]
+fn settle_income<'info>(
+    property_program: &AccountInfo<'info>,
+    cpi_auth: &AccountInfo<'info>,
+    payer: &AccountInfo<'info>,
+    income: &AccountInfo<'info>,
+    holding: &AccountInfo<'info>,
+    checkpoint: &AccountInfo<'info>,
+    system_program: &AccountInfo<'info>,
+    cpi_auth_bump: u8,
+    asset_id: u64,
+    owner: Pubkey,
+) -> Result<()> {
+    let mut data = SETTLE_INCOME_DISC.to_vec();
+    data.extend_from_slice(&asset_id.to_le_bytes());
+    data.extend_from_slice(owner.as_ref());
+    let ix = Instruction {
+        program_id: PROPERTY_PROGRAM,
+        accounts: vec![
+            AccountMeta::new_readonly(cpi_auth.key(), true),
+            AccountMeta::new(payer.key(), true),
+            AccountMeta::new_readonly(income.key(), false),
+            AccountMeta::new_readonly(holding.key(), false),
+            AccountMeta::new(checkpoint.key(), false),
+            AccountMeta::new_readonly(system_program.key(), false),
+        ],
+        data,
+    };
+    let bump = [cpi_auth_bump];
+    let seeds: &[&[u8]] = &[CPI_AUTH_SEED, &bump];
+    invoke_signed(
+        &ix,
+        &[
+            cpi_auth.clone(),
+            payer.clone(),
+            income.clone(),
+            holding.clone(),
+            checkpoint.clone(),
+            system_program.clone(),
+            property_program.clone(),
+        ],
+        &[seeds],
+    )
+    .map_err(Into::into)
+}
+
+/// Put part of a holding up for sale on the secondary market. The shares
+/// stay on the seller's ledger, still earning income, but are reserved
+/// against voting and other transfers until sold or delisted.
+#[derive(Accounts)]
+#[instruction(asset_id: u64)]
+pub struct RelistShares<'info> {
+    pub seller: Signer<'info>,
+
+    /// Whoever fronts the rent: the seller on the default path, or any
+    /// willing wallet. The listing remembers who to refund.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(mut, seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+
+    /// The seller's investor role, owned by the roles program; must be
+    /// compliant, since this opens a sale.
+    #[account(
+        seeds = [
+            xcavate_whitelist::ROLE_SEED,
+            seller.key().as_ref(),
+            &[Role::RealEstateInvestor.seed_byte()],
+        ],
+        bump = seller_role.bump,
+        seeds::program = xcavate_whitelist::ID,
+        constraint = seller_role.is_compliant() @ MarketplaceError::NotCompliant,
+    )]
+    pub seller_role: Box<Account<'info, RoleAccount>>,
+
+    /// The primary listing; carries the property's lifecycle status.
+    #[account(
+        seeds = [LISTING_SEED, &asset_id.to_le_bytes()],
+        bump = listing.bump,
+    )]
+    pub listing: Box<Account<'info, Listing>>,
+
+    #[account(
+        mut,
+        seeds = [SHARE_SEED, &asset_id.to_le_bytes(), seller.key().as_ref()],
+        bump = holding.bump,
+    )]
+    pub holding: Box<Account<'info, ShareHolding>>,
+
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + ShareListing::INIT_SPACE,
+        seeds = [SHARE_LISTING_SEED, &config.next_share_listing_id.to_le_bytes()],
+        bump,
+    )]
+    pub share_listing: Box<Account<'info, ShareListing>>,
+
+    pub system_program: Program<'info, System>,
+}
+
+pub fn relist_shares_handler(
+    ctx: Context<RelistShares>,
+    asset_id: u64,
+    amount: u32,
+    share_price: u64,
+) -> Result<()> {
+    require!(
+        ctx.accounts.listing.status == ListingStatus::Finalized,
+        MarketplaceError::PropertyNotFinalized
+    );
+    require!(amount > 0, MarketplaceError::InvalidShareAmount);
+    require!(share_price > 0, MarketplaceError::InvalidSharePrice);
+    // Same floor as the primary listing: one whole unit of the
+    // smallest-decimals accepted mint, so no per-share price can rescale to
+    // zero. The full lot must also stay priceable in u64.
+    require!(
+        share_price >= 10u64.pow((PRICE_DECIMALS - MIN_PAYMENT_DECIMALS) as u32),
+        MarketplaceError::InvalidSharePrice
+    );
+    share_price
+        .checked_mul(amount as u64)
+        .ok_or(MarketplaceError::Overflow)?;
+
+    let holding = &mut ctx.accounts.holding;
+    require!(
+        amount <= holding.transferable(),
+        MarketplaceError::NotEnoughShares
+    );
+    holding.listed = holding
+        .listed
+        .checked_add(amount)
+        .ok_or(MarketplaceError::Overflow)?;
+
+    let config = &mut ctx.accounts.config;
+    let id = config.next_share_listing_id;
+    config.next_share_listing_id = id.checked_add(1).ok_or(MarketplaceError::Overflow)?;
+
+    let share_listing = &mut ctx.accounts.share_listing;
+    share_listing.id = id;
+    share_listing.asset_id = asset_id;
+    share_listing.seller = ctx.accounts.seller.key();
+    share_listing.share_price = share_price;
+    share_listing.amount = amount;
+    share_listing.fee_bps = config.marketplace_fee_bps;
+    share_listing.rent_payer = ctx.accounts.payer.key();
+    share_listing.bump = ctx.bumps.share_listing;
+
+    emit!(SharesRelisted {
+        id,
+        asset_id,
+        seller: share_listing.seller,
+        share_price,
+        amount,
+    });
+    Ok(())
+}
+
+/// Take an unsold listing off the market. Seller only, role-free: this is a
+/// pure exit.
+#[derive(Accounts)]
+pub struct DelistShares<'info> {
+    pub seller: Signer<'info>,
+
+    /// CHECK: the wallet that fronted the listing's rent; gets it back as
+    /// the listing closes.
+    #[account(mut, address = share_listing.rent_payer @ MarketplaceError::WrongRentPayer)]
+    pub rent_payer: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        close = rent_payer,
+        seeds = [SHARE_LISTING_SEED, &share_listing.id.to_le_bytes()],
+        bump = share_listing.bump,
+        constraint = share_listing.seller == seller.key() @ MarketplaceError::WrongSeller,
+    )]
+    pub share_listing: Box<Account<'info, ShareListing>>,
+
+    #[account(
+        mut,
+        seeds = [
+            SHARE_SEED,
+            &share_listing.asset_id.to_le_bytes(),
+            seller.key().as_ref(),
+        ],
+        bump = holding.bump,
+    )]
+    pub holding: Box<Account<'info, ShareHolding>>,
+}
+
+pub fn delist_shares_handler(ctx: Context<DelistShares>) -> Result<()> {
+    let holding = &mut ctx.accounts.holding;
+    holding.listed = holding
+        .listed
+        .checked_sub(ctx.accounts.share_listing.amount)
+        .ok_or(MarketplaceError::Overflow)?;
+
+    emit!(SharesDelisted {
+        id: ctx.accounts.share_listing.id,
+        asset_id: ctx.accounts.share_listing.asset_id,
+        amount: ctx.accounts.share_listing.amount,
+    });
+    Ok(())
+}
+
+/// Buy from a secondary listing. Both parties' income settles at their
+/// pre-trade balances first, then the buyer pays the seller (minus the fee
+/// snapshotted on the listing, which goes to the treasury) and the shares
+/// move ledger and token side. A partial buy leaves the listing open for
+/// the rest.
+#[derive(Accounts)]
+#[instruction(asset_id: u64, id: u64)]
+pub struct BuyRelistedShares<'info> {
+    pub buyer: Signer<'info>,
+
+    /// Whoever fronts rent for accounts created along the way: the sponsor
+    /// on the default path, or any willing wallet.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    /// The buyer's investor role, owned by the roles program; must be
+    /// compliant, since investor money moves.
+    #[account(
+        seeds = [
+            xcavate_whitelist::ROLE_SEED,
+            buyer.key().as_ref(),
+            &[Role::RealEstateInvestor.seed_byte()],
+        ],
+        bump = buyer_role.bump,
+        seeds::program = xcavate_whitelist::ID,
+        constraint = buyer_role.is_compliant() @ MarketplaceError::NotCompliant,
+    )]
+    pub buyer_role: Box<Account<'info, RoleAccount>>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+
+    /// CHECK: the primary listing (status gate and the ownership-cap
+    /// snapshot), seeds-pinned here and deserialized in the handler to keep
+    /// its bulk off the `try_accounts` stack.
+    #[account(seeds = [LISTING_SEED, &asset_id.to_le_bytes()], bump)]
+    pub listing: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        seeds = [PROPERTY_SEED, &asset_id.to_le_bytes()],
+        bump = property.bump,
+    )]
+    pub property: Box<Account<'info, PropertyAsset>>,
+
+    #[account(
+        mut,
+        seeds = [SHARE_LISTING_SEED, &id.to_le_bytes()],
+        bump = share_listing.bump,
+        constraint = share_listing.asset_id == asset_id @ MarketplaceError::LedgerMismatch,
+    )]
+    pub share_listing: Box<Account<'info, ShareListing>>,
+
+    /// CHECK: the seller, from the listing; authority of the payout and
+    /// share accounts below.
+    #[account(address = share_listing.seller @ MarketplaceError::WrongSeller)]
+    pub seller: UncheckedAccount<'info>,
+
+    /// CHECK: the wallet that fronted the listing's rent; gets it back if
+    /// this buy empties the listing.
+    #[account(mut, address = share_listing.rent_payer @ MarketplaceError::WrongRentPayer)]
+    pub rent_payer: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        seeds = [SHARE_SEED, &asset_id.to_le_bytes(), seller.key().as_ref()],
+        bump = seller_holding.bump,
+    )]
+    pub seller_holding: Box<Account<'info, ShareHolding>>,
+
+    #[account(
+        init_if_needed,
+        payer = payer,
+        space = 8 + ShareHolding::INIT_SPACE,
+        seeds = [SHARE_SEED, &asset_id.to_le_bytes(), buyer.key().as_ref()],
+        bump,
+    )]
+    pub buyer_holding: Box<Account<'info, ShareHolding>>,
+
+    /// CHECK: the mint the buyer pays in; must be on the accepted list, and
+    /// the transfers fail on any account that doesn't match it.
+    pub payment_mint: UncheckedAccount<'info>,
+
+    /// CHECK: the buyer's token account the money leaves; the token program
+    /// rules on it during the transfers.
+    #[account(mut)]
+    pub buyer_payment: UncheckedAccount<'info>,
+
+    /// CHECK: the seller's associated account for the paid mint; created
+    /// idempotently, so a closed account can't strand the proceeds.
+    #[account(mut)]
+    pub seller_payment: UncheckedAccount<'info>,
+
+    /// CHECK: the treasury owner key from config; authority of the ATA
+    /// below.
+    #[account(address = config.treasury @ MarketplaceError::WrongPayee)]
+    pub treasury: UncheckedAccount<'info>,
+
+    /// CHECK: the treasury's associated account for the paid mint; created
+    /// idempotently.
+    #[account(mut)]
+    pub treasury_payment: UncheckedAccount<'info>,
+
+    /// CHECK: the share mint PDA (owned by the Token-2022 program).
+    #[account(seeds = [SHARE_MINT_SEED, &asset_id.to_le_bytes()], bump)]
+    pub share_mint: UncheckedAccount<'info>,
+
+    /// CHECK: the share mint's authority PDA; permanent delegate, signs the
+    /// transfer and the lock-state changes.
+    #[account(seeds = [MINT_AUTH_SEED, &asset_id.to_le_bytes()], bump)]
+    pub mint_auth: UncheckedAccount<'info>,
+
+    /// CHECK: the seller's share account; the handler pins it to its
+    /// derivation (kept out of `try_accounts` for stack room).
+    #[account(mut)]
+    pub seller_share_account: UncheckedAccount<'info>,
+
+    /// CHECK: the buyer's associated share account; created idempotently,
+    /// so the ATA program verifies the derivation.
+    #[account(mut)]
+    pub buyer_share_account: UncheckedAccount<'info>,
+
+    /// CHECK: this program's CPI signer PDA; holds no data, only signs the
+    /// income settlements.
+    #[account(seeds = [CPI_AUTH_SEED], bump)]
+    pub cpi_auth: UncheckedAccount<'info>,
+
+    /// CHECK: the property's income ledger; the handler pins it to its
+    /// derivation under the property program, because its existence decides
+    /// whether the settlements run at all, so a stand-in account can't be
+    /// used to skip them.
+    pub income: UncheckedAccount<'info>,
+
+    /// CHECK: the seller's income checkpoint; verified by the property
+    /// program.
+    #[account(mut)]
+    pub seller_checkpoint: UncheckedAccount<'info>,
+
+    /// CHECK: the buyer's income checkpoint; verified by the property
+    /// program.
+    #[account(mut)]
+    pub buyer_checkpoint: UncheckedAccount<'info>,
+
+    /// CHECK: the property program the settlements CPI into, pinned by
+    /// address.
+    #[account(address = PROPERTY_PROGRAM @ MarketplaceError::WrongPayee)]
+    pub property_program: UncheckedAccount<'info>,
+
+    /// The payment mint's token program (classic or Token-2022).
+    pub payment_token_program: Interface<'info, TokenInterface>,
+    /// The share mint's program is always Token-2022.
+    pub share_token_program: Program<'info, Token2022>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
+pub fn buy_relisted_shares_handler<'info>(
+    ctx: Context<'info, BuyRelistedShares<'info>>,
+    asset_id: u64,
+    id: u64,
+    amount: u32,
+    max_total_cost: u64,
+) -> Result<()> {
+    let primary: Account<Listing> = Account::try_from(&ctx.accounts.listing)?;
+    require!(
+        primary.status == ListingStatus::Finalized,
+        MarketplaceError::PropertyNotFinalized
+    );
+    require!(amount > 0, MarketplaceError::InvalidShareAmount);
+    let share_listing = &ctx.accounts.share_listing;
+    require!(
+        amount <= share_listing.amount,
+        MarketplaceError::NotEnoughSharesListed
+    );
+    let mint_key = ctx.accounts.payment_mint.key();
+    require!(
+        ctx.accounts
+            .config
+            .accepted_payment_mints
+            .contains(&mint_key),
+        MarketplaceError::MintNotAccepted
+    );
+    // The derivation pins moved out of `try_accounts` for stack room.
+    require!(
+        ctx.accounts.seller_share_account.key()
+            == get_associated_token_address_with_program_id(
+                &ctx.accounts.seller.key(),
+                &ctx.accounts.share_mint.key(),
+                &ctx.accounts.share_token_program.key(),
+            ),
+        MarketplaceError::WrongVaultAccount
+    );
+    require!(
+        ctx.accounts.income.key()
+            == Pubkey::find_program_address(
+                &[INCOME_SEED, &asset_id.to_le_bytes()],
+                &PROPERTY_PROGRAM
+            )
+            .0,
+        MarketplaceError::WrongVaultAccount
+    );
+
+    // Ownership cap, against the snapshot taken at listing time. Holdings
+    // must stay strictly below the cap, same rule as the primary sale.
+    let owned_after = (ctx.accounts.buyer_holding.amount as u64)
+        .checked_add(amount as u64)
+        .ok_or(MarketplaceError::Overflow)?;
+    let max_shares = (primary.max_ownership_bps as u64)
+        .checked_mul(ctx.accounts.property.share_amount as u64)
+        .ok_or(MarketplaceError::Overflow)?
+        / 10_000;
+    require!(
+        owned_after < max_shares,
+        MarketplaceError::MaxOwnershipExceeded
+    );
+
+    // Price off the listing snapshots, rescaled to the paid mint. The
+    // caller caps the total, so nothing can charge more than they signed
+    // for. The fee comes out of the seller's proceeds.
+    let total_quote = share_listing
+        .share_price
+        .checked_mul(amount as u64)
+        .ok_or(MarketplaceError::Overflow)?;
+    let mint_decimals = {
+        let data = ctx.accounts.payment_mint.try_borrow_data()?;
+        StateWithExtensions::<MintState>::unpack(&data)?
+            .base
+            .decimals
+    };
+    let total = scale_to_mint(total_quote, mint_decimals)?;
+    require!(total <= max_total_cost, MarketplaceError::CostTooHigh);
+    let fee = scale_to_mint(bps_of(total_quote, share_listing.fee_bps)?, mint_decimals)?;
+    let seller_part = total.checked_sub(fee).ok_or(MarketplaceError::Overflow)?;
+
+    let seller_key = ctx.accounts.seller.key();
+    let buyer_key = ctx.accounts.buyer.key();
+
+    // A first-time buyer's holding was created just now, so its zero-share
+    // state must be flushed for the settlement CPI to read; Anchor would
+    // otherwise only write it at exit.
+    let buyer_holding = &mut ctx.accounts.buyer_holding;
+    if buyer_holding.owner == Pubkey::default() {
+        buyer_holding.asset_id = asset_id;
+        buyer_holding.owner = buyer_key;
+        buyer_holding.locks = [0; LOCK_REASONS];
+        buyer_holding.listed = 0;
+        buyer_holding.bump = ctx.bumps.buyer_holding;
+        ctx.accounts.property.holder_count = ctx
+            .accounts
+            .property
+            .holder_count
+            .checked_add(1)
+            .ok_or(MarketplaceError::Overflow)?;
+        ctx.accounts.buyer_holding.exit(&crate::ID)?;
+    }
+
+    // Both parties settle their accrued income at pre-trade balances, so
+    // the trade can neither capture nor strand anyone's rent. A property
+    // that never distributed income has no ledger yet and nothing to
+    // settle; once one exists, the address pin above makes these calls
+    // unavoidable.
+    if !ctx.accounts.income.data_is_empty() {
+        settle_income(
+            &ctx.accounts.property_program.to_account_info(),
+            &ctx.accounts.cpi_auth.to_account_info(),
+            &ctx.accounts.payer.to_account_info(),
+            &ctx.accounts.income.to_account_info(),
+            &ctx.accounts.seller_holding.to_account_info(),
+            &ctx.accounts.seller_checkpoint.to_account_info(),
+            &ctx.accounts.system_program.to_account_info(),
+            ctx.bumps.cpi_auth,
+            asset_id,
+            seller_key,
+        )?;
+        settle_income(
+            &ctx.accounts.property_program.to_account_info(),
+            &ctx.accounts.cpi_auth.to_account_info(),
+            &ctx.accounts.payer.to_account_info(),
+            &ctx.accounts.income.to_account_info(),
+            &ctx.accounts.buyer_holding.to_account_info(),
+            &ctx.accounts.buyer_checkpoint.to_account_info(),
+            &ctx.accounts.system_program.to_account_info(),
+            ctx.bumps.cpi_auth,
+            asset_id,
+            buyer_key,
+        )?;
+    }
+
+    // The seller is paid at their ATA, created if needed, so a closed
+    // account can't block the sale; same for the treasury's fee.
+    create_idempotent(CpiContext::new(
+        ctx.accounts.associated_token_program.key(),
+        CreateAta {
+            payer: ctx.accounts.payer.to_account_info(),
+            associated_token: ctx.accounts.seller_payment.to_account_info(),
+            authority: ctx.accounts.seller.to_account_info(),
+            mint: ctx.accounts.payment_mint.to_account_info(),
+            system_program: ctx.accounts.system_program.to_account_info(),
+            token_program: ctx.accounts.payment_token_program.to_account_info(),
+        },
+    ))?;
+    transfer_checked(
+        CpiContext::new(
+            ctx.accounts.payment_token_program.key(),
+            TransferChecked {
+                from: ctx.accounts.buyer_payment.to_account_info(),
+                mint: ctx.accounts.payment_mint.to_account_info(),
+                to: ctx.accounts.seller_payment.to_account_info(),
+                authority: ctx.accounts.buyer.to_account_info(),
+            },
+        ),
+        seller_part,
+        mint_decimals,
+    )?;
+    if fee > 0 {
+        create_idempotent(CpiContext::new(
+            ctx.accounts.associated_token_program.key(),
+            CreateAta {
+                payer: ctx.accounts.payer.to_account_info(),
+                associated_token: ctx.accounts.treasury_payment.to_account_info(),
+                authority: ctx.accounts.treasury.to_account_info(),
+                mint: ctx.accounts.payment_mint.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                token_program: ctx.accounts.payment_token_program.to_account_info(),
+            },
+        ))?;
+        transfer_checked(
+            CpiContext::new(
+                ctx.accounts.payment_token_program.key(),
+                TransferChecked {
+                    from: ctx.accounts.buyer_payment.to_account_info(),
+                    mint: ctx.accounts.payment_mint.to_account_info(),
+                    to: ctx.accounts.treasury_payment.to_account_info(),
+                    authority: ctx.accounts.buyer.to_account_info(),
+                },
+            ),
+            fee,
+            mint_decimals,
+        )?;
+    }
+
+    // Shares through the usual airlock, this time seller to buyer with the
+    // permanent delegate signing.
+    let id_bytes = asset_id.to_le_bytes();
+    let auth_seeds: &[&[u8]] = &[MINT_AUTH_SEED, &id_bytes, &[ctx.bumps.mint_auth]];
+    create_idempotent(CpiContext::new(
+        ctx.accounts.associated_token_program.key(),
+        CreateAta {
+            payer: ctx.accounts.payer.to_account_info(),
+            associated_token: ctx.accounts.buyer_share_account.to_account_info(),
+            authority: ctx.accounts.buyer.to_account_info(),
+            mint: ctx.accounts.share_mint.to_account_info(),
+            system_program: ctx.accounts.system_program.to_account_info(),
+            token_program: ctx.accounts.share_token_program.to_account_info(),
+        },
+    ))?;
+    for account in [
+        &ctx.accounts.seller_share_account,
+        &ctx.accounts.buyer_share_account,
+    ] {
+        thaw_account(CpiContext::new_with_signer(
+            ctx.accounts.share_token_program.key(),
+            ThawAccount {
+                account: account.to_account_info(),
+                mint: ctx.accounts.share_mint.to_account_info(),
+                authority: ctx.accounts.mint_auth.to_account_info(),
+            },
+            &[auth_seeds],
+        ))?;
+    }
+    transfer_checked(
+        CpiContext::new_with_signer(
+            ctx.accounts.share_token_program.key(),
+            TransferChecked {
+                from: ctx.accounts.seller_share_account.to_account_info(),
+                mint: ctx.accounts.share_mint.to_account_info(),
+                to: ctx.accounts.buyer_share_account.to_account_info(),
+                authority: ctx.accounts.mint_auth.to_account_info(),
+            },
+            &[auth_seeds],
+        ),
+        amount as u64,
+        0,
+    )?;
+    for account in [
+        &ctx.accounts.seller_share_account,
+        &ctx.accounts.buyer_share_account,
+    ] {
+        freeze_account(CpiContext::new_with_signer(
+            ctx.accounts.share_token_program.key(),
+            FreezeAccount {
+                account: account.to_account_info(),
+                mint: ctx.accounts.share_mint.to_account_info(),
+                authority: ctx.accounts.mint_auth.to_account_info(),
+            },
+            &[auth_seeds],
+        ))?;
+    }
+
+    // Ledger: the sold shares leave the seller's balance and their listing
+    // reserve together, keeping the lock invariant intact.
+    let seller_holding = &mut ctx.accounts.seller_holding;
+    seller_holding.amount = seller_holding
+        .amount
+        .checked_sub(amount)
+        .ok_or(MarketplaceError::Overflow)?;
+    seller_holding.listed = seller_holding
+        .listed
+        .checked_sub(amount)
+        .ok_or(MarketplaceError::Overflow)?;
+
+    let buyer_holding = &mut ctx.accounts.buyer_holding;
+    buyer_holding.amount = buyer_holding
+        .amount
+        .checked_add(amount)
+        .ok_or(MarketplaceError::Overflow)?;
+
+    let share_listing = &mut ctx.accounts.share_listing;
+    share_listing.amount = share_listing
+        .amount
+        .checked_sub(amount)
+        .ok_or(MarketplaceError::Overflow)?;
+    let remaining = share_listing.amount;
+    if remaining == 0 {
+        share_listing.close(ctx.accounts.rent_payer.to_account_info())?;
+    }
+
+    emit!(RelistedSharesBought {
+        id,
+        asset_id,
+        buyer: buyer_key,
+        seller: seller_key,
+        amount,
+        mint: mint_key,
+        paid: total,
+        fee,
+        remaining,
+    });
+    Ok(())
+}
+
+/// Reclaim an emptied holding's rent and take it out of the holder count.
+/// Permissionless: once a seller has sold their last share, anyone may
+/// sweep the account, and the rent goes back to the collector that fronted
+/// investor accounts.
+#[derive(Accounts)]
+pub struct CloseShareHolding<'info> {
+    pub cranker: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+
+    /// CHECK: the sponsor wallet holdings' rent returns to, from config.
+    #[account(mut, address = config.rent_collector @ MarketplaceError::WrongPayee)]
+    pub rent_collector: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        seeds = [PROPERTY_SEED, &holding.asset_id.to_le_bytes()],
+        bump = property.bump,
+    )]
+    pub property: Box<Account<'info, PropertyAsset>>,
+
+    #[account(
+        mut,
+        close = rent_collector,
+        seeds = [
+            SHARE_SEED,
+            &holding.asset_id.to_le_bytes(),
+            holding.owner.as_ref(),
+        ],
+        bump = holding.bump,
+    )]
+    pub holding: Box<Account<'info, ShareHolding>>,
+}
+
+pub fn close_share_holding_handler(ctx: Context<CloseShareHolding>) -> Result<()> {
+    let holding = &ctx.accounts.holding;
+    require!(
+        holding.amount == 0 && holding.locked() == 0 && holding.listed == 0,
+        MarketplaceError::HoldingNotEmpty
+    );
+    ctx.accounts.property.holder_count = ctx
+        .accounts
+        .property
+        .holder_count
+        .checked_sub(1)
+        .ok_or(MarketplaceError::Overflow)?;
+
+    emit!(ShareHoldingClosed {
+        asset_id: holding.asset_id,
+        owner: holding.owner,
+    });
+    Ok(())
+}
+
+#[event]
+pub struct SharesRelisted {
+    pub id: u64,
+    pub asset_id: u64,
+    pub seller: Pubkey,
+    pub share_price: u64,
+    pub amount: u32,
+}
+
+#[event]
+pub struct SharesDelisted {
+    pub id: u64,
+    pub asset_id: u64,
+    pub amount: u32,
+}
+
+#[event]
+pub struct RelistedSharesBought {
+    pub id: u64,
+    pub asset_id: u64,
+    pub buyer: Pubkey,
+    pub seller: Pubkey,
+    pub amount: u32,
+    pub mint: Pubkey,
+    /// What the buyer paid in the mint's units, and the slice of it that
+    /// went to the treasury.
+    pub paid: u64,
+    pub fee: u64,
+    pub remaining: u32,
+}
+
+#[event]
+pub struct ShareHoldingClosed {
+    pub asset_id: u64,
+    pub owner: Pubkey,
+}

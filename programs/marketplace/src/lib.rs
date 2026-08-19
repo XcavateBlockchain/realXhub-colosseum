@@ -248,6 +248,33 @@ pub mod marketplace {
         reserve::close_reservation_handler(ctx)
     }
 
+    pub fn relist_shares(
+        ctx: Context<RelistShares>,
+        asset_id: u64,
+        amount: u32,
+        share_price: u64,
+    ) -> Result<()> {
+        secondary::relist_shares_handler(ctx, asset_id, amount, share_price)
+    }
+
+    pub fn delist_shares(ctx: Context<DelistShares>) -> Result<()> {
+        secondary::delist_shares_handler(ctx)
+    }
+
+    pub fn buy_relisted_shares<'info>(
+        ctx: Context<'info, BuyRelistedShares<'info>>,
+        asset_id: u64,
+        id: u64,
+        amount: u32,
+        max_total_cost: u64,
+    ) -> Result<()> {
+        secondary::buy_relisted_shares_handler(ctx, asset_id, id, amount, max_total_cost)
+    }
+
+    pub fn close_share_holding(ctx: Context<CloseShareHolding>) -> Result<()> {
+        secondary::close_share_holding_handler(ctx)
+    }
+
     pub fn lock_shares(
         ctx: Context<AdjustShareLock>,
         asset_id: u64,

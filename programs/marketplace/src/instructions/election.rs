@@ -161,7 +161,7 @@ pub fn vote_on_spv_lawyer_handler(
         .checked_add(amount)
         .ok_or(MarketplaceError::Overflow)?;
     require!(
-        locked_after <= holding.amount,
+        locked_after <= holding.votable(),
         MarketplaceError::NotEnoughShares
     );
     holding.locks[lock] = locked_after;

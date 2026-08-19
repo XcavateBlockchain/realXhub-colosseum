@@ -723,6 +723,23 @@ fn challenge_votes_unlock_after_expiry() {
 }
 
 #[test]
+fn listed_shares_carry_no_vote_weight() {
+    let (mut svm, admin, agent) = gov_setup();
+    propose(&mut svm, &agent, 1, MID_AMOUNT);
+    // A holder with 30 of 50 shares up for sale can only vote the rest.
+    let voter = new_holder(&mut svm, &admin, ASSET, 50);
+    seed_holding_full(&mut svm, ASSET, &voter.pubkey(), 50, 0, 30);
+    fails_with(
+        &mut svm,
+        vote_proposal_ix(&voter.pubkey(), ASSET, 1, VoteChoice::Yes, 21),
+        &voter,
+        &[&voter, &sponsor()],
+        "NotEnoughShares",
+    );
+    vote(&mut svm, &voter, 1, VoteChoice::Yes, 20);
+}
+
+#[test]
 fn proposal_and_challenge_votes_carry_full_weight_at_once() {
     let (mut svm, admin, agent) = gov_setup();
     propose(&mut svm, &agent, 1, MID_AMOUNT);

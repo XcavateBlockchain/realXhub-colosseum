@@ -575,6 +575,7 @@ pub fn seed_market_config(svm: &mut LiteSVM, accepted: &[Pubkey]) {
         lawyer_voting_time: 0,
         min_voting_quorum_bps: 0,
         next_listing_id: 0,
+        next_share_listing_id: 0,
         bump,
     };
     let mut data = MarketConfig::DISCRIMINATOR.to_vec();
@@ -604,6 +605,17 @@ pub fn seed_holding_with_lock(
     amount: u32,
     locked: u32,
 ) {
+    seed_holding_full(svm, asset_id, owner, amount, locked, 0);
+}
+
+pub fn seed_holding_full(
+    svm: &mut LiteSVM,
+    asset_id: u64,
+    owner: &Pubkey,
+    amount: u32,
+    locked: u32,
+    listed: u32,
+) {
     let (address, bump) = Pubkey::find_program_address(
         &[
             marketplace::SHARE_SEED,
@@ -621,6 +633,7 @@ pub fn seed_holding_with_lock(
         owner: *owner,
         amount,
         locks,
+        listed,
         bump,
     };
     let mut data = ShareHolding::DISCRIMINATOR.to_vec();

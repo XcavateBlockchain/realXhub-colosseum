@@ -222,4 +222,16 @@ pub enum MarketplaceError {
     /// developer something to be paid from.
     #[msg("Tax and marketplace fee together exceed the sale proceeds")]
     TaxExceedsProceeds,
+    /// Secondary trading only exists on settled, live properties.
+    #[msg("Property is not finalized")]
+    PropertyNotFinalized,
+    /// The share listing carries fewer shares than the buy asks for.
+    #[msg("Not enough shares listed")]
+    NotEnoughSharesListed,
+    /// Only the listing's seller may act on it.
+    #[msg("Caller is not the seller")]
+    WrongSeller,
+    /// The holding still carries shares, locks, or an open listing.
+    #[msg("Holding is not empty")]
+    HoldingNotEmpty,
 }

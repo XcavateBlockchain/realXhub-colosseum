@@ -58,8 +58,10 @@ impl ConfigParams {
                 && self.max_property_shares <= MAX_SHARE_SUPPLY,
             MarketplaceError::InvalidConfig
         );
+        // The marketplace fee comes out of sale proceeds, so at 100% a
+        // secondary sale would pay the seller nothing.
         require!(
-            self.marketplace_fee_bps <= 10_000 && self.investor_fee_bps <= 10_000,
+            self.marketplace_fee_bps < 10_000 && self.investor_fee_bps <= 10_000,
             MarketplaceError::InvalidConfig
         );
         require!(
@@ -168,6 +170,7 @@ pub fn handler(ctx: Context<InitializeConfig>, params: ConfigParams) -> Result<(
     config.xcav_mint = ctx.accounts.xcav_mint.key();
     params.apply(config);
     config.next_listing_id = 0;
+    config.next_share_listing_id = 0;
     config.bump = ctx.bumps.config;
 
     emit!(ConfigInitialized {

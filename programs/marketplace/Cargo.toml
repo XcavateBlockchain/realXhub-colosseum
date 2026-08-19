@@ -27,6 +27,7 @@ xcavate-whitelist = { path = "../xcavate-whitelist", features = ["cpi"] }
 regions = { path = "../regions", features = ["no-entrypoint"] }
 
 [dev-dependencies]
+property = { path = "../property" }
 litesvm = { workspace = true }
 solana-message = { workspace = true }
 solana-transaction = { workspace = true }

@@ -364,6 +364,7 @@ pub fn buy_property_shares_handler(
         holding.asset_id = listing_id;
         holding.owner = ctx.accounts.investor.key();
         holding.locks = [0; LOCK_REASONS];
+        holding.listed = 0;
         holding.bump = ctx.bumps.holding;
         ctx.accounts.property.holder_count = ctx
             .accounts

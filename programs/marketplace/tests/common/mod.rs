@@ -1899,3 +1899,178 @@ pub fn setup() -> (LiteSVM, Keypair, Keypair) {
     );
     (svm, admin, authority)
 }
+
+// --- secondary market ---
+
+pub fn share_listing_pda(id: u64) -> Pubkey {
+    Pubkey::find_program_address(
+        &[marketplace::SHARE_LISTING_SEED, &id.to_le_bytes()],
+        &mid(),
+    )
+    .0
+}
+
+pub fn share_listing_of(svm: &LiteSVM, id: u64) -> marketplace::state::ShareListing {
+    let acc = svm.get_account(&share_listing_pda(id)).unwrap();
+    marketplace::state::ShareListing::try_deserialize(&mut acc.data.as_slice()).unwrap()
+}
+
+pub fn marketplace_cpi_auth() -> Pubkey {
+    Pubkey::find_program_address(&[marketplace::CPI_AUTH_SEED], &mid()).0
+}
+
+/// The property program's income and checkpoint PDAs, derived with its
+/// published seeds; the settlement CPI reads them.
+pub fn property_income_pda(asset_id: u64) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"income", &asset_id.to_le_bytes()],
+        &marketplace::PROPERTY_PROGRAM,
+    )
+    .0
+}
+pub fn property_checkpoint_pda(asset_id: u64, owner: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"checkpoint", &asset_id.to_le_bytes(), owner.as_ref()],
+        &marketplace::PROPERTY_PROGRAM,
+    )
+    .0
+}
+
+pub fn relist_ix(seller: &Pubkey, asset_id: u64, id: u64, amount: u32, price: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::RelistShares {
+            asset_id,
+            amount,
+            share_price: price,
+        }
+        .data(),
+        marketplace::accounts::RelistShares {
+            seller: *seller,
+            payer: *seller,
+            config: marketplace_config(),
+            seller_role: role_pda(seller, Role::RealEstateInvestor),
+            listing: listing_pda(asset_id),
+            holding: holding_pda(asset_id, seller),
+            share_listing: share_listing_pda(id),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn delist_ix(seller: &Pubkey, asset_id: u64, id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::DelistShares {}.data(),
+        marketplace::accounts::DelistShares {
+            seller: *seller,
+            rent_payer: *seller,
+            share_listing: share_listing_pda(id),
+            holding: holding_pda(asset_id, seller),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn buy_relisted_ix(
+    buyer: &Pubkey,
+    asset_id: u64,
+    id: u64,
+    seller: &Pubkey,
+    amount: u32,
+    max_total_cost: u64,
+) -> Instruction {
+    buy_relisted_ix_with_mint(
+        buyer,
+        asset_id,
+        id,
+        seller,
+        amount,
+        max_total_cost,
+        tgbp_mint(),
+        tgbp_acc(buyer),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn buy_relisted_ix_with_mint(
+    buyer: &Pubkey,
+    asset_id: u64,
+    id: u64,
+    seller: &Pubkey,
+    amount: u32,
+    max_total_cost: u64,
+    payment_mint: Pubkey,
+    buyer_payment: Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::BuyRelistedShares {
+            asset_id,
+            id,
+            amount,
+            max_total_cost,
+        }
+        .data(),
+        marketplace::accounts::BuyRelistedShares {
+            buyer: *buyer,
+            payer: *buyer,
+            buyer_role: role_pda(buyer, Role::RealEstateInvestor),
+            config: marketplace_config(),
+            listing: listing_pda(asset_id),
+            property: property_pda(asset_id),
+            share_listing: share_listing_pda(id),
+            seller: *seller,
+            rent_payer: *seller,
+            seller_holding: holding_pda(asset_id, seller),
+            buyer_holding: holding_pda(asset_id, buyer),
+            payment_mint,
+            buyer_payment,
+            seller_payment: payment_ata(seller, &payment_mint),
+            treasury: treasury(),
+            treasury_payment: payment_ata(&treasury(), &payment_mint),
+            share_mint: share_mint_pda(asset_id),
+            mint_auth: mint_auth_pda(asset_id),
+            seller_share_account: investor_share_ata(asset_id, seller),
+            buyer_share_account: investor_share_ata(asset_id, buyer),
+            cpi_auth: marketplace_cpi_auth(),
+            income: property_income_pda(asset_id),
+            seller_checkpoint: property_checkpoint_pda(asset_id, seller),
+            buyer_checkpoint: property_checkpoint_pda(asset_id, buyer),
+            property_program: marketplace::PROPERTY_PROGRAM,
+            payment_token_program: TOKEN_PROGRAM_ID,
+            share_token_program: anchor_spl::token_2022::ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn close_holding_ix(cranker: &Pubkey, asset_id: u64, owner: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::CloseShareHolding {}.data(),
+        marketplace::accounts::CloseShareHolding {
+            cranker: *cranker,
+            config: marketplace_config(),
+            rent_collector: sponsor().pubkey(),
+            property: property_pda(asset_id),
+            holding: holding_pda(asset_id, owner),
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// Raw balance of any token account address, Token-2022 extensions included.
+pub fn token_balance(svm: &LiteSVM, address: &Pubkey) -> u64 {
+    use anchor_spl::token_2022::spl_token_2022::{
+        extension::StateWithExtensions, state::Account as Token2022Account,
+    };
+    let acc = svm.get_account(address).unwrap();
+    StateWithExtensions::<Token2022Account>::unpack(&acc.data)
+        .unwrap()
+        .base
+        .amount
+}

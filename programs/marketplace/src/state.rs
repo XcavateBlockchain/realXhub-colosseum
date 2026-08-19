@@ -58,6 +58,8 @@ pub struct Config {
     pub min_voting_quorum_bps: u16,
     /// Monotonic id for the next listing.
     pub next_listing_id: u64,
+    /// Monotonic id for the next secondary share listing.
+    pub next_share_listing_id: u64,
     pub bump: u8,
 }
 
@@ -365,6 +367,10 @@ pub struct ShareHolding {
     /// Shares locked by votes, one counter per `LockReason`. Counters are
     /// additive within a reason but overlap across reasons.
     pub locks: [u32; LOCK_REASONS],
+    /// Shares committed to open secondary listings. Still counted in
+    /// `amount` — the seller keeps the ledger, and the income that comes
+    /// with it, until the moment of sale — but out of voting and transfers.
+    pub listed: u32,
     pub bump: u8,
 }
 
@@ -373,6 +379,40 @@ impl ShareHolding {
     pub fn locked(&self) -> u32 {
         self.locks.into_iter().max().unwrap_or(0)
     }
+
+    /// Shares free to vote with: everything not committed to a listing.
+    pub fn votable(&self) -> u32 {
+        self.amount.saturating_sub(self.listed)
+    }
+
+    /// Shares free to sell or send: everything neither vote-locked nor
+    /// already listed.
+    pub fn transferable(&self) -> u32 {
+        self.amount
+            .saturating_sub(self.locked())
+            .saturating_sub(self.listed)
+    }
+}
+
+/// A holder's open offer to sell part of their shares on the secondary
+/// market. The shares stay on the seller's holding (reserved via `listed`)
+/// until someone buys.
+#[account]
+#[derive(InitSpace)]
+pub struct ShareListing {
+    pub id: u64,
+    pub asset_id: u64,
+    pub seller: Pubkey,
+    /// Asking price per share, in quote units.
+    pub share_price: u64,
+    /// Shares still for sale; partial buys draw it down.
+    pub amount: u32,
+    /// Marketplace fee at the moment of listing, so a config change can't
+    /// reprice the seller's proceeds under them.
+    pub fee_bps: u16,
+    /// The wallet that fronted the account's rent; refunded at close.
+    pub rent_payer: Pubkey,
+    pub bump: u8,
 }
 
 /// One investor's stake in a primary listing: what they paid, per component,

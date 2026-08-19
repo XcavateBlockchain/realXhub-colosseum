@@ -49,3 +49,10 @@ pub const CPI_AUTH_SEED: &[u8] = b"cpi-auth";
 /// `anchor keys sync` does not touch this, so update it by hand whenever the
 /// property program id rotates.
 pub const PROPERTY_PROGRAM: Pubkey = pubkey!("deCp9srk9C6P4BXJaFpjR5H6Jsm6DCq8AL2kk338dVq");
+
+/// Seed of the property program's income ledger, mirrored here so the
+/// settlement CPI can pin the account it inspects.
+pub const INCOME_SEED: &[u8] = b"income";
+
+#[constant]
+pub const SHARE_LISTING_SEED: &[u8] = b"share-listing";

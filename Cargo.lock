@@ -2246,6 +2246,7 @@ dependencies = [
  "anchor-lang",
  "anchor-spl",
  "litesvm",
+ "property",
  "proptest",
  "regions",
  "solana-account",

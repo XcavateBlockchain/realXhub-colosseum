@@ -36,10 +36,10 @@ pub fn lock_shares_handler(
     let locked_after = holding.locks[reason as usize]
         .checked_add(amount)
         .ok_or(MarketplaceError::Overflow)?;
-    // Each reason is capped by the balance on its own; other reasons don't
-    // count against it.
+    // Each reason is capped by the votable balance on its own; other
+    // reasons don't count against it, but listed shares do.
     require!(
-        locked_after <= holding.amount,
+        locked_after <= holding.votable(),
         MarketplaceError::NotEnoughShares
     );
     holding.locks[reason as usize] = locked_after;
