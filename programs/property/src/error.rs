@@ -91,4 +91,22 @@ pub enum PropertyError {
     PendingIncome,
     #[msg("Checkpoint owner still holds shares")]
     SharesStillHeld,
+    #[msg("Amount must be greater than zero")]
+    ZeroAmount,
+    #[msg("A proposal is already running for this property")]
+    ProposalOngoing,
+    #[msg("A challenge is already running against the agent")]
+    ChallengeOngoing,
+    /// Proposals and challenges are numbered; a new one must take the next
+    /// id in its sequence.
+    #[msg("Wrong proposal or challenge id")]
+    WrongGovernanceId,
+    #[msg("Too soon since the last auto-approved request")]
+    AutoApprovalTooSoon,
+    #[msg("No agent is assigned to this property")]
+    SeatVacant,
+    #[msg("Caller holds no shares of this property")]
+    NotAHolder,
+    #[msg("Details hash must not be zero")]
+    InvalidDetailsHash,
 }

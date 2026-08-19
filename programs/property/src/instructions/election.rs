@@ -16,7 +16,7 @@ use xcavate_whitelist::state::{Role, RoleAccount};
 /// their old and new vote. The lock lives on the marketplace ShareHolding,
 /// where transfers check it, so the mirror goes through a CPI signed by this
 /// program's `cpi-auth` PDA.
-fn adjust_share_lock<'info>(
+pub(crate) fn adjust_share_lock<'info>(
     cpi_auth: &AccountInfo<'info>,
     holding: &AccountInfo<'info>,
     cpi_auth_bump: u8,
@@ -487,6 +487,8 @@ pub fn finalize_agent_election_handler<'info>(
     let letting = &mut ctx.accounts.letting;
     if assigned {
         letting.agent = winner;
+        // A new agent starts with a clean record.
+        letting.governance.strikes = 0;
     }
     // The round number stays for the vote records and candidacies still
     // keyed to it; the cleared window is what lets them close.

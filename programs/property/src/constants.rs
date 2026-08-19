@@ -33,3 +33,15 @@ pub const INCOME_VAULT_SEED: &[u8] = b"income-vault";
 
 #[constant]
 pub const CHECKPOINT_SEED: &[u8] = b"checkpoint";
+
+#[constant]
+pub const PROPOSAL_SEED: &[u8] = b"gov-proposal";
+
+#[constant]
+pub const PROPOSAL_VOTE_SEED: &[u8] = b"gov-proposal-vote";
+
+#[constant]
+pub const CHALLENGE_SEED: &[u8] = b"gov-challenge";
+
+#[constant]
+pub const CHALLENGE_VOTE_SEED: &[u8] = b"gov-challenge-vote";

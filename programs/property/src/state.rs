@@ -32,6 +32,20 @@ pub struct Config {
     pub min_voting_quorum_bps: u16,
     /// Seconds between an agent's resignation notice and the seat opening.
     pub agent_notice_period: i64,
+    /// Seconds a spending proposal or challenge vote stays open.
+    pub proposal_voting_time: i64,
+    /// Requests at or under this approve without a vote, in quote units.
+    pub low_proposal: u64,
+    /// Requests at or over this need the high threshold, in quote units.
+    pub high_proposal: u64,
+    /// Yes share of yes+no a high request must reach, in basis points.
+    pub high_threshold_bps: u16,
+    /// Seconds between auto-approved requests on one property.
+    pub auto_approval_cooldown: i64,
+    /// XCAV a challenger stakes against the sitting agent.
+    pub challenge_deposit: u64,
+    /// XCAV slashed from the agent's location deposit per passed challenge.
+    pub agent_slash_amount: u64,
     pub bump: u8,
 }
 
@@ -59,8 +73,29 @@ pub struct AgentElection {
     pub quorum_bps: u16,
 }
 
-/// A property's letting seat: who manages it and the election that fills the
-/// seat. Created by the first candidacy and kept for the property's life.
+/// A property's governance ledger: one live proposal and one live challenge
+/// at a time, and strikes against the sitting agent.
+#[derive(
+    AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, PartialEq, Eq, Debug, Default,
+)]
+pub struct GovState {
+    /// Ids already used; the next proposal or challenge takes count + 1.
+    pub proposal_count: u64,
+    pub challenge_count: u64,
+    /// The live proposal / challenge id; zero while none. One of each at a
+    /// time per property.
+    pub active_proposal: u64,
+    pub active_challenge: u64,
+    /// Passed challenges against the sitting agent; three remove them.
+    /// Reset when a new agent takes the seat.
+    pub strikes: u8,
+    /// When the last request was approved without a vote.
+    pub last_auto_approval_ts: i64,
+}
+
+/// A property's letting seat: who manages it, the election that fills the
+/// seat, and the governance the holders run over the agent. Created by the
+/// first candidacy and kept for the property's life.
 #[account]
 #[derive(InitSpace)]
 pub struct PropertyLetting {
@@ -68,6 +103,7 @@ pub struct PropertyLetting {
     /// The assigned agent; default while the seat is vacant.
     pub agent: Pubkey,
     pub election: AgentElection,
+    pub governance: GovState,
     /// The wallet that fronted the account's rent.
     pub rent_payer: Pubkey,
     pub bump: u8,
@@ -179,6 +215,93 @@ pub struct IncomeCheckpoint {
     #[max_len(MAX_INCOME_STREAMS)]
     pub entries: Vec<CheckpointEntry>,
     /// The wallet that fronted the account's rent; refunded at close.
+    pub rent_payer: Pubkey,
+    pub bump: u8,
+}
+
+/// A vote's direction. Abstain counts toward quorum but neither side.
+#[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VoteChoice {
+    Yes,
+    No,
+    Abstain,
+}
+
+/// Share-weighted vote tallies.
+#[derive(
+    AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, PartialEq, Eq, Debug, Default,
+)]
+pub struct Tally {
+    pub yes: u32,
+    pub no: u32,
+    pub abstain: u32,
+}
+
+/// The assigned agent's request for holder sign-off on spending for the
+/// property. Small requests approve on the spot (cooldown-gated) and never
+/// hit storage; the rest live here for the length of the vote. The money
+/// itself moves off chain, authorized by the `ProposalExecuted` event.
+#[account]
+#[derive(InitSpace)]
+pub struct Proposal {
+    pub asset_id: u64,
+    /// Monotonic per property; vote records are keyed by it.
+    pub id: u64,
+    pub proposer: Pubkey,
+    /// What they ask for, in quote units.
+    pub amount: u64,
+    /// Hash of the off-chain document describing the work.
+    pub details_hash: [u8; 32],
+    /// When voting closes.
+    pub expiry: i64,
+    pub tally: Tally,
+    /// Quorum and approval threshold at the moment the vote opened, so a
+    /// config change can't move the goalposts mid-vote. The threshold is
+    /// zero below the high tier.
+    pub quorum_bps: u16,
+    pub threshold_bps: u16,
+    /// The wallet that fronted the account's rent; refunded at close.
+    pub rent_payer: Pubkey,
+    pub bump: u8,
+}
+
+/// A holder's move to strike the sitting agent, backed by an XCAV stake the
+/// challenger loses if the vote goes against them.
+#[account]
+#[derive(InitSpace)]
+pub struct Challenge {
+    pub asset_id: u64,
+    /// Monotonic per property; vote records are keyed by it.
+    pub id: u64,
+    pub challenger: Pubkey,
+    /// The agent on the seat when the challenge opened; the punishment only
+    /// applies while they still hold it.
+    pub agent: Pubkey,
+    /// The challenger's stake, held in the XCAV vault.
+    pub deposit: u64,
+    pub expiry: i64,
+    pub tally: Tally,
+    /// Quorum at the moment the vote opened.
+    pub quorum_bps: u16,
+    /// The wallet that fronted the account's rent; refunded at close.
+    pub rent_payer: Pubkey,
+    pub bump: u8,
+}
+
+/// One holder's vote on one proposal or challenge (the seed prefix says
+/// which). The voting shares stay locked in the marketplace ShareHolding
+/// until the record is closed again by the matching unlock instruction.
+#[account]
+#[derive(InitSpace)]
+pub struct GovVote {
+    pub asset_id: u64,
+    /// The proposal or challenge the vote belongs to.
+    pub id: u64,
+    pub voter: Pubkey,
+    pub choice: VoteChoice,
+    /// The shares this vote locked and counts for.
+    pub power: u32,
+    /// The wallet that fronted the record's rent; refunded at close.
     pub rent_payer: Pubkey,
     pub bump: u8,
 }

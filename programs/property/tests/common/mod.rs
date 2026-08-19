@@ -15,8 +15,9 @@ pub use anchor_lang::AccountDeserialize;
 pub use litesvm::LiteSVM;
 pub use marketplace::state::{Config as MarketConfig, PropertyAsset, ShareHolding};
 pub use property::state::{
-    AgentCandidacy, AgentElection, AgentVote, CheckpointEntry, Config as PropertyConfig,
-    IncomeCheckpoint, LettingAgent, PropertyIncome, PropertyLetting, ResignationNotice,
+    AgentCandidacy, AgentElection, AgentVote, Challenge, CheckpointEntry, Config as PropertyConfig,
+    GovState, GovVote, IncomeCheckpoint, LettingAgent, PropertyIncome, PropertyLetting, Proposal,
+    ResignationNotice, VoteChoice,
 };
 pub use solana_keypair::Keypair;
 pub use solana_signer::Signer;
@@ -33,8 +34,9 @@ use anchor_spl::token::ID as TOKEN_PROGRAM_ID;
 use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};
 use property::instructions::ConfigParams;
 use property::{
-    AGENT_CANDIDATE_SEED, AGENT_SEED, AGENT_VOTE_SEED, CHECKPOINT_SEED, CONFIG_SEED, CPI_AUTH_SEED,
-    INCOME_SEED, INCOME_VAULT_SEED, LETTING_SEED, RESIGNATION_SEED, VAULT_SEED,
+    AGENT_CANDIDATE_SEED, AGENT_SEED, AGENT_VOTE_SEED, CHALLENGE_SEED, CHALLENGE_VOTE_SEED,
+    CHECKPOINT_SEED, CONFIG_SEED, CPI_AUTH_SEED, INCOME_SEED, INCOME_VAULT_SEED, LETTING_SEED,
+    PROPOSAL_SEED, PROPOSAL_VOTE_SEED, RESIGNATION_SEED, VAULT_SEED,
 };
 use solana_account::Account;
 use solana_message::{Message, VersionedMessage};
@@ -50,6 +52,13 @@ pub const VOTING_TIME: i64 = 3_600;
 pub const QUORUM_BPS: u16 = 2_500;
 pub const NOTICE_PERIOD: i64 = 86_400;
 pub const SHARE_SUPPLY: u32 = 100;
+// Governance numbers, in quote units (9 decimals) unless marked XCAV.
+pub const LOW_PROPOSAL: u64 = 100_000_000_000;
+pub const HIGH_PROPOSAL: u64 = 1_000_000_000_000;
+pub const HIGH_THRESHOLD_BPS: u16 = 6_700;
+pub const AUTO_COOLDOWN: i64 = 7 * 86_400;
+pub const CHALLENGE_DEPOSIT: u64 = 50_000_000;
+pub const SLASH_AMOUNT: u64 = 50_000_000;
 
 // --- ids / PDAs ---
 
@@ -143,6 +152,48 @@ pub fn checkpoint_pda(asset_id: u64, owner: &Pubkey) -> Pubkey {
         &pid(),
     )
     .0
+}
+pub fn proposal_pda(asset_id: u64, id: u64) -> Pubkey {
+    Pubkey::find_program_address(
+        &[PROPOSAL_SEED, &asset_id.to_le_bytes(), &id.to_le_bytes()],
+        &pid(),
+    )
+    .0
+}
+pub fn proposal_vote_pda(asset_id: u64, id: u64, voter: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            PROPOSAL_VOTE_SEED,
+            &asset_id.to_le_bytes(),
+            &id.to_le_bytes(),
+            voter.as_ref(),
+        ],
+        &pid(),
+    )
+    .0
+}
+pub fn challenge_pda(asset_id: u64, id: u64) -> Pubkey {
+    Pubkey::find_program_address(
+        &[CHALLENGE_SEED, &asset_id.to_le_bytes(), &id.to_le_bytes()],
+        &pid(),
+    )
+    .0
+}
+pub fn challenge_vote_pda(asset_id: u64, id: u64, voter: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            CHALLENGE_VOTE_SEED,
+            &asset_id.to_le_bytes(),
+            &id.to_le_bytes(),
+            voter.as_ref(),
+        ],
+        &pid(),
+    )
+    .0
+}
+/// The real XCAV ATA the challenge crank pays refunds and slashes into.
+pub fn xcav_ata(owner: &Pubkey) -> Pubkey {
+    anchor_spl::associated_token::get_associated_token_address(owner, &xcav_mint())
 }
 pub fn mkt_config_pda() -> Pubkey {
     Pubkey::find_program_address(&[marketplace::CONFIG_SEED], &mid()).0
@@ -590,6 +641,7 @@ pub fn seed_letting(svm: &mut LiteSVM, asset_id: u64, agent: &Pubkey) {
         asset_id,
         agent: *agent,
         election: AgentElection::default(),
+        governance: GovState::default(),
         rent_payer: Pubkey::new_unique(),
         bump,
     };
@@ -606,6 +658,48 @@ pub fn seed_letting(svm: &mut LiteSVM, asset_id: u64, agent: &Pubkey) {
         },
     )
     .unwrap();
+}
+
+/// Bump the assigned count on one of an agent's registered locations,
+/// exactly as an election win would leave it.
+pub fn seed_assignment(svm: &mut LiteSVM, wallet: &Pubkey, postcode: &[u8]) {
+    let address = agent_pda(wallet);
+    let acc = svm.get_account(&address).unwrap();
+    let mut entry = LettingAgent::try_deserialize(&mut acc.data.as_slice()).unwrap();
+    entry
+        .locations
+        .iter_mut()
+        .find(|l| l.postcode == postcode)
+        .unwrap()
+        .assigned_count += 1;
+    let mut data = LettingAgent::DISCRIMINATOR.to_vec();
+    entry.serialize(&mut data).unwrap();
+    data.resize(acc.data.len(), 0);
+    svm.set_account(address, Account { data, ..acc }).unwrap();
+}
+
+/// Swap the assigned agent on an existing letting seat, keeping the rest of
+/// its state (election, governance) intact.
+pub fn set_letting_agent(svm: &mut LiteSVM, asset_id: u64, agent: &Pubkey) {
+    let address = letting_pda(asset_id);
+    let acc = svm.get_account(&address).unwrap();
+    let mut letting = PropertyLetting::try_deserialize(&mut acc.data.as_slice()).unwrap();
+    letting.agent = *agent;
+    let mut data = PropertyLetting::DISCRIMINATOR.to_vec();
+    letting.serialize(&mut data).unwrap();
+    svm.set_account(address, Account { data, ..acc }).unwrap();
+}
+
+/// Overwrite the recorded deposit on an agent's first location.
+pub fn set_location_deposit(svm: &mut LiteSVM, wallet: &Pubkey, deposit: u64) {
+    let address = agent_pda(wallet);
+    let acc = svm.get_account(&address).unwrap();
+    let mut entry = LettingAgent::try_deserialize(&mut acc.data.as_slice()).unwrap();
+    entry.locations[0].deposit = deposit;
+    let mut data = LettingAgent::DISCRIMINATOR.to_vec();
+    entry.serialize(&mut data).unwrap();
+    data.resize(acc.data.len(), 0);
+    svm.set_account(address, Account { data, ..acc }).unwrap();
 }
 
 /// Write an `IncomeCheckpoint` directly, for states only a marketplace
@@ -655,6 +749,13 @@ pub fn default_params() -> ConfigParams {
         agent_voting_time: VOTING_TIME,
         min_voting_quorum_bps: QUORUM_BPS,
         agent_notice_period: NOTICE_PERIOD,
+        proposal_voting_time: VOTING_TIME,
+        low_proposal: LOW_PROPOSAL,
+        high_proposal: HIGH_PROPOSAL,
+        high_threshold_bps: HIGH_THRESHOLD_BPS,
+        auto_approval_cooldown: AUTO_COOLDOWN,
+        challenge_deposit: CHALLENGE_DEPOSIT,
+        agent_slash_amount: SLASH_AMOUNT,
     }
 }
 
@@ -885,7 +986,7 @@ pub fn finalize_resignation_ix(cranker: &Pubkey, resigner: &Pubkey, asset_id: u6
             rent_payer: *resigner,
             letting: letting_pda(asset_id),
             property: mkt_property_pda(asset_id),
-            agent_entry: agent_pda(resigner),
+            agent_entry: Some(agent_pda(resigner)),
             notice: resignation_pda(asset_id),
         }
         .to_account_metas(None),
@@ -973,7 +1074,212 @@ pub fn close_checkpoint_ix(holder: &Pubkey, rent_payer: &Pubkey, asset_id: u64) 
     )
 }
 
-// --- state readers ---
+// --- governance instruction builders ---
+
+pub fn propose_ix(
+    agent: &Pubkey,
+    asset_id: u64,
+    id: u64,
+    amount: u64,
+    details_hash: [u8; 32],
+) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::Propose {
+            asset_id,
+            id,
+            amount,
+            details_hash,
+        }
+        .data(),
+        property::accounts::Propose {
+            agent: *agent,
+            payer: *agent,
+            config: property_config(),
+            agent_role: role_pda(agent, Role::LettingAgent),
+            letting: letting_pda(asset_id),
+            proposal: proposal_pda(asset_id, id),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn vote_proposal_ix(
+    voter: &Pubkey,
+    asset_id: u64,
+    id: u64,
+    choice: VoteChoice,
+    amount: u32,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::VoteOnProposal {
+            asset_id,
+            choice,
+            amount,
+        }
+        .data(),
+        property::accounts::VoteOnProposal {
+            voter: *voter,
+            payer: sponsor().pubkey(),
+            voter_role: role_pda(voter, Role::RealEstateInvestor),
+            letting: letting_pda(asset_id),
+            proposal: proposal_pda(asset_id, id),
+            holding: holding_pda(asset_id, voter),
+            vote_record: proposal_vote_pda(asset_id, id, voter),
+            cpi_auth: cpi_auth(),
+            marketplace_program: mid(),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn finalize_proposal_ix(
+    cranker: &Pubkey,
+    rent_payer: &Pubkey,
+    asset_id: u64,
+    id: u64,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::FinalizeProposal { asset_id }.data(),
+        property::accounts::FinalizeProposal {
+            cranker: *cranker,
+            rent_payer: *rent_payer,
+            letting: letting_pda(asset_id),
+            property: mkt_property_pda(asset_id),
+            proposal: proposal_pda(asset_id, id),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn unlock_proposal_votes_ix(voter: &Pubkey, asset_id: u64, id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::UnlockProposalVotes { asset_id, id }.data(),
+        property::accounts::UnlockProposalVotes {
+            voter: *voter,
+            rent_payer: sponsor().pubkey(),
+            proposal: proposal_pda(asset_id, id),
+            holding: holding_pda(asset_id, voter),
+            vote_record: proposal_vote_pda(asset_id, id, voter),
+            cpi_auth: cpi_auth(),
+            marketplace_program: mid(),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn challenge_ix(challenger: &Pubkey, asset_id: u64, id: u64, max_deposit: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::ChallengeAgent {
+            asset_id,
+            id,
+            max_deposit,
+        }
+        .data(),
+        property::accounts::ChallengeAgent {
+            challenger: *challenger,
+            payer: *challenger,
+            config: property_config(),
+            challenger_role: role_pda(challenger, Role::RealEstateInvestor),
+            holding: holding_pda(asset_id, challenger),
+            letting: letting_pda(asset_id),
+            challenge: challenge_pda(asset_id, id),
+            xcav_mint: xcav_mint(),
+            challenger_token: token_acc(challenger),
+            vault: vault(),
+            token_program: TOKEN_PROGRAM_ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn vote_challenge_ix(
+    voter: &Pubkey,
+    asset_id: u64,
+    id: u64,
+    choice: VoteChoice,
+    amount: u32,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::VoteOnChallenge {
+            asset_id,
+            choice,
+            amount,
+        }
+        .data(),
+        property::accounts::VoteOnChallenge {
+            voter: *voter,
+            payer: sponsor().pubkey(),
+            voter_role: role_pda(voter, Role::RealEstateInvestor),
+            letting: letting_pda(asset_id),
+            challenge: challenge_pda(asset_id, id),
+            holding: holding_pda(asset_id, voter),
+            vote_record: challenge_vote_pda(asset_id, id, voter),
+            cpi_auth: cpi_auth(),
+            marketplace_program: mid(),
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn finalize_challenge_ix(
+    cranker: &Pubkey,
+    rent_payer: &Pubkey,
+    asset_id: u64,
+    id: u64,
+    agent: Option<&Pubkey>,
+    challenger: &Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::FinalizeChallenge { asset_id }.data(),
+        property::accounts::FinalizeChallenge {
+            cranker: *cranker,
+            rent_payer: *rent_payer,
+            config: property_config(),
+            letting: letting_pda(asset_id),
+            property: mkt_property_pda(asset_id),
+            challenge: challenge_pda(asset_id, id),
+            agent_entry: agent.map(agent_pda),
+            xcav_mint: xcav_mint(),
+            vault: vault(),
+            treasury: treasury(),
+            treasury_token: xcav_ata(&treasury()),
+            challenger: *challenger,
+            challenger_token: xcav_ata(challenger),
+            token_program: TOKEN_PROGRAM_ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn unlock_challenge_votes_ix(voter: &Pubkey, asset_id: u64, id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &property::instruction::UnlockChallengeVotes { asset_id, id }.data(),
+        property::accounts::UnlockChallengeVotes {
+            voter: *voter,
+            rent_payer: sponsor().pubkey(),
+            challenge: challenge_pda(asset_id, id),
+            holding: holding_pda(asset_id, voter),
+            vote_record: challenge_vote_pda(asset_id, id, voter),
+            cpi_auth: cpi_auth(),
+            marketplace_program: mid(),
+        }
+        .to_account_metas(None),
+    )
+}
 
 pub fn agent_of(svm: &LiteSVM, wallet: &Pubkey) -> LettingAgent {
     let acc = svm.get_account(&agent_pda(wallet)).unwrap();
@@ -1010,6 +1316,16 @@ pub fn income_of(svm: &LiteSVM, asset_id: u64) -> PropertyIncome {
 pub fn checkpoint_of(svm: &LiteSVM, asset_id: u64, owner: &Pubkey) -> IncomeCheckpoint {
     let acc = svm.get_account(&checkpoint_pda(asset_id, owner)).unwrap();
     IncomeCheckpoint::try_deserialize(&mut acc.data.as_slice()).unwrap()
+}
+
+pub fn proposal_of(svm: &LiteSVM, asset_id: u64, id: u64) -> Proposal {
+    let acc = svm.get_account(&proposal_pda(asset_id, id)).unwrap();
+    Proposal::try_deserialize(&mut acc.data.as_slice()).unwrap()
+}
+
+pub fn challenge_of(svm: &LiteSVM, asset_id: u64, id: u64) -> Challenge {
+    let acc = svm.get_account(&challenge_pda(asset_id, id)).unwrap();
+    Challenge::try_deserialize(&mut acc.data.as_slice()).unwrap()
 }
 
 pub fn notice_of(svm: &LiteSVM, asset_id: u64) -> ResignationNotice {

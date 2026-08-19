@@ -87,15 +87,15 @@ pub struct FinalizeResignation<'info> {
     )]
     pub property: Box<Account<'info, PropertyAsset>>,
 
-    /// The resigning agent's registry entry. It must still exist: the
-    /// assignment blocks the agent from leaving the location until this
-    /// crank releases it.
+    /// The resigning agent's registry entry, whose assignment count drops.
+    /// Required while they still hold the seat; a governance removal can
+    /// vacate it first, leaving a stale notice that closes without it.
     #[account(
         mut,
         seeds = [AGENT_SEED, notice.agent.as_ref()],
         bump = agent_entry.bump,
     )]
-    pub agent_entry: Box<Account<'info, LettingAgent>>,
+    pub agent_entry: Option<Box<Account<'info, LettingAgent>>>,
 
     #[account(
         mut,
@@ -115,26 +115,28 @@ pub fn finalize_resignation_handler(
         Clock::get()?.unix_timestamp >= notice.due_ts,
         PropertyError::NoticePeriodRunning
     );
-    // The seat can't have changed hands while the notice ran: claims are
-    // blocked while an agent is assigned, and only this crank unassigns.
-    require!(
-        ctx.accounts.letting.agent == notice.agent,
-        PropertyError::NotAssignedAgent
-    );
+    // A governance removal can vacate the seat while the notice runs; the
+    // stale notice then just closes, since the removal already released the
+    // assignment. Otherwise only this crank unassigns.
+    if ctx.accounts.letting.agent == notice.agent {
+        let location = &ctx.accounts.property.location;
+        let entry = ctx
+            .accounts
+            .agent_entry
+            .as_mut()
+            .ok_or(PropertyError::WrongAgent)?;
+        let entry_location = entry
+            .locations
+            .iter_mut()
+            .find(|l| l.postcode == *location)
+            .ok_or(PropertyError::NotInLocation)?;
+        entry_location.assigned_count = entry_location
+            .assigned_count
+            .checked_sub(1)
+            .ok_or(PropertyError::Overflow)?;
 
-    let location = &ctx.accounts.property.location;
-    let entry = &mut ctx.accounts.agent_entry;
-    let entry_location = entry
-        .locations
-        .iter_mut()
-        .find(|l| l.postcode == *location)
-        .ok_or(PropertyError::NotInLocation)?;
-    entry_location.assigned_count = entry_location
-        .assigned_count
-        .checked_sub(1)
-        .ok_or(PropertyError::Overflow)?;
-
-    ctx.accounts.letting.agent = Pubkey::default();
+        ctx.accounts.letting.agent = Pubkey::default();
+    }
 
     emit!(AgentResignationFinalized {
         asset_id,

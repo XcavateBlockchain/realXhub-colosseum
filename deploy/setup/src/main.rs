@@ -79,6 +79,8 @@ fn marketplace_params(
 }
 
 fn property_params(treasury: Pubkey, sponsor: Pubkey) -> property::instructions::ConfigParams {
+    // Governance amounts are quote units (9 decimals, GBP).
+    const GBP: u64 = 1_000_000_000;
     property::instructions::ConfigParams {
         treasury,
         rent_collector: sponsor,
@@ -86,6 +88,13 @@ fn property_params(treasury: Pubkey, sponsor: Pubkey) -> property::instructions:
         agent_voting_time: 600,
         min_voting_quorum_bps: 1_000,
         agent_notice_period: 3_600,
+        proposal_voting_time: 600,
+        low_proposal: 100 * GBP,
+        high_proposal: 1_000 * GBP,
+        high_threshold_bps: 6_700,
+        auto_approval_cooldown: 600,
+        challenge_deposit: 10 * XCAV,
+        agent_slash_amount: 10 * XCAV,
     }
 }
 

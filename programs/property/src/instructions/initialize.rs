@@ -14,6 +14,13 @@ pub struct ConfigParams {
     pub agent_voting_time: i64,
     pub min_voting_quorum_bps: u16,
     pub agent_notice_period: i64,
+    pub proposal_voting_time: i64,
+    pub low_proposal: u64,
+    pub high_proposal: u64,
+    pub high_threshold_bps: u16,
+    pub auto_approval_cooldown: i64,
+    pub challenge_deposit: u64,
+    pub agent_slash_amount: u64,
 }
 
 impl ConfigParams {
@@ -24,11 +31,22 @@ impl ConfigParams {
         );
         require!(self.agent_deposit > 0, PropertyError::InvalidConfig);
         require!(
-            self.agent_voting_time > 0 && self.agent_notice_period > 0,
+            self.agent_voting_time > 0
+                && self.agent_notice_period > 0
+                && self.proposal_voting_time > 0
+                && self.auto_approval_cooldown > 0,
             PropertyError::InvalidConfig
         );
         require!(
-            self.min_voting_quorum_bps <= 10_000,
+            self.min_voting_quorum_bps <= 10_000 && self.high_threshold_bps <= 10_000,
+            PropertyError::InvalidConfig
+        );
+        require!(
+            self.low_proposal <= self.high_proposal,
+            PropertyError::InvalidConfig
+        );
+        require!(
+            self.challenge_deposit > 0 && self.agent_slash_amount > 0,
             PropertyError::InvalidConfig
         );
         Ok(())
@@ -41,6 +59,13 @@ impl ConfigParams {
         config.agent_voting_time = self.agent_voting_time;
         config.min_voting_quorum_bps = self.min_voting_quorum_bps;
         config.agent_notice_period = self.agent_notice_period;
+        config.proposal_voting_time = self.proposal_voting_time;
+        config.low_proposal = self.low_proposal;
+        config.high_proposal = self.high_proposal;
+        config.high_threshold_bps = self.high_threshold_bps;
+        config.auto_approval_cooldown = self.auto_approval_cooldown;
+        config.challenge_deposit = self.challenge_deposit;
+        config.agent_slash_amount = self.agent_slash_amount;
     }
 }
 

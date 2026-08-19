@@ -17,6 +17,7 @@ pub use constants::*;
 pub use instructions::ConfigParams;
 
 use instructions::*;
+use state::VoteChoice;
 
 declare_id!("deCp9srk9C6P4BXJaFpjR5H6Jsm6DCq8AL2kk338dVq");
 
@@ -117,5 +118,66 @@ pub mod property {
 
     pub fn finalize_resignation(ctx: Context<FinalizeResignation>, asset_id: u64) -> Result<()> {
         resignation::finalize_resignation_handler(ctx, asset_id)
+    }
+
+    pub fn propose(
+        ctx: Context<Propose>,
+        asset_id: u64,
+        id: u64,
+        amount: u64,
+        details_hash: [u8; 32],
+    ) -> Result<()> {
+        governance::propose_handler(ctx, asset_id, id, amount, details_hash)
+    }
+
+    pub fn vote_on_proposal(
+        ctx: Context<VoteOnProposal>,
+        asset_id: u64,
+        choice: VoteChoice,
+        amount: u32,
+    ) -> Result<()> {
+        governance::vote_on_proposal_handler(ctx, asset_id, choice, amount)
+    }
+
+    pub fn finalize_proposal(ctx: Context<FinalizeProposal>, asset_id: u64) -> Result<()> {
+        governance::finalize_proposal_handler(ctx, asset_id)
+    }
+
+    pub fn unlock_proposal_votes<'info>(
+        ctx: Context<'info, UnlockProposalVotes<'info>>,
+        asset_id: u64,
+        id: u64,
+    ) -> Result<()> {
+        governance::unlock_proposal_votes_handler(ctx, asset_id, id)
+    }
+
+    pub fn challenge_agent(
+        ctx: Context<ChallengeAgent>,
+        asset_id: u64,
+        id: u64,
+        max_deposit: u64,
+    ) -> Result<()> {
+        governance::challenge_agent_handler(ctx, asset_id, id, max_deposit)
+    }
+
+    pub fn vote_on_challenge(
+        ctx: Context<VoteOnChallenge>,
+        asset_id: u64,
+        choice: VoteChoice,
+        amount: u32,
+    ) -> Result<()> {
+        governance::vote_on_challenge_handler(ctx, asset_id, choice, amount)
+    }
+
+    pub fn finalize_challenge(ctx: Context<FinalizeChallenge>, asset_id: u64) -> Result<()> {
+        governance::finalize_challenge_handler(ctx, asset_id)
+    }
+
+    pub fn unlock_challenge_votes<'info>(
+        ctx: Context<'info, UnlockChallengeVotes<'info>>,
+        asset_id: u64,
+        id: u64,
+    ) -> Result<()> {
+        governance::unlock_challenge_votes_handler(ctx, asset_id, id)
     }
 }
