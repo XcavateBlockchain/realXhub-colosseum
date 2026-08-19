@@ -174,7 +174,7 @@ fn vote_locks_shares_in_the_marketplace_ledger() {
     assert_eq!(candidacy_of(&svm, ASSET, 1, &agent.pubkey()).vote_power, 40);
     let holding = holding_of(&svm, ASSET, &holder.pubkey());
     assert_eq!(holding.amount, 60);
-    assert_eq!(holding.locked_amount, 40);
+    assert_eq!(holding.locked(), 40);
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn revote_moves_the_power() {
         candidacy_of(&svm, ASSET, 1, &second.pubkey()).vote_power,
         25
     );
-    assert_eq!(holding_of(&svm, ASSET, &holder.pubkey()).locked_amount, 25);
+    assert_eq!(holding_of(&svm, ASSET, &holder.pubkey()).locked(), 25);
 
     // Same candidate again: no previous account rides along.
     vote(&mut svm, &holder, 1, &second.pubkey(), 30);
@@ -243,7 +243,7 @@ fn revote_moves_the_power() {
         candidacy_of(&svm, ASSET, 1, &second.pubkey()).vote_power,
         30
     );
-    assert_eq!(holding_of(&svm, ASSET, &holder.pubkey()).locked_amount, 30);
+    assert_eq!(holding_of(&svm, ASSET, &holder.pubkey()).locked(), 30);
 }
 
 #[test]
@@ -599,7 +599,7 @@ fn unlock_waits_for_the_round_to_settle() {
         &holder,
         &[&holder],
     );
-    assert_eq!(holding_of(&svm, ASSET, &holder.pubkey()).locked_amount, 0);
+    assert_eq!(holding_of(&svm, ASSET, &holder.pubkey()).locked(), 0);
     assert!(account_gone(
         &svm,
         &agent_vote_pda(ASSET, 1, &holder.pubkey())
@@ -676,11 +676,12 @@ fn lock_surface_rejects_wallet_callers() {
         &marketplace::instruction::LockShares {
             asset_id: ASSET,
             owner: holder.pubkey(),
+            reason: LockReason::AgentElection,
             amount: 60,
         }
         .data(),
         accounts,
     );
     fails_with(&mut svm, ix, &attacker, &[&attacker], "AccountNotSigner");
-    assert_eq!(holding_of(&svm, ASSET, &holder.pubkey()).locked_amount, 0);
+    assert_eq!(holding_of(&svm, ASSET, &holder.pubkey()).locked(), 0);
 }

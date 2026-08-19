@@ -17,6 +17,7 @@ pub use constants::*;
 pub use instructions::ConfigParams;
 
 use instructions::*;
+use state::LockReason;
 
 declare_id!("dj9Q3CpHvDHwexCbkgJ5APDx4JsTxPssNebkvP15g1T");
 
@@ -251,17 +252,19 @@ pub mod marketplace {
         ctx: Context<AdjustShareLock>,
         asset_id: u64,
         owner: Pubkey,
+        reason: LockReason,
         amount: u32,
     ) -> Result<()> {
-        locks::lock_shares_handler(ctx, asset_id, owner, amount)
+        locks::lock_shares_handler(ctx, asset_id, owner, reason, amount)
     }
 
     pub fn unlock_shares(
         ctx: Context<AdjustShareLock>,
         asset_id: u64,
         owner: Pubkey,
+        reason: LockReason,
         amount: u32,
     ) -> Result<()> {
-        locks::unlock_shares_handler(ctx, asset_id, owner, amount)
+        locks::unlock_shares_handler(ctx, asset_id, owner, reason, amount)
     }
 }

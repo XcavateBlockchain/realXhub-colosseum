@@ -13,6 +13,7 @@ use crate::constants::{
 use crate::error::MarketplaceError;
 use crate::state::{
     Config, InvestorPosition, Listing, ListingStatus, PropertyAsset, Reservation, ShareHolding,
+    LOCK_REASONS,
 };
 
 use xcavate_whitelist::state::{Role, RoleAccount};
@@ -486,7 +487,7 @@ pub fn claim_shares_handler(ctx: Context<ClaimShares>, listing_id: u64) -> Resul
     if holding.owner == Pubkey::default() {
         holding.asset_id = listing_id;
         holding.owner = ctx.accounts.investor.key();
-        holding.locked_amount = 0;
+        holding.locks = [0; LOCK_REASONS];
         holding.bump = ctx.bumps.holding;
         ctx.accounts.property.holder_count = ctx
             .accounts

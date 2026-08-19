@@ -9,19 +9,21 @@ use crate::state::{
 };
 
 use marketplace::program::Marketplace;
-use marketplace::state::{PropertyAsset, ShareHolding};
+use marketplace::state::{LockReason, PropertyAsset, ShareHolding};
 use xcavate_whitelist::state::{Role, RoleAccount};
 
 /// Adjust the voter's share lock in the marketplace by the difference between
-/// their old and new vote. The lock lives on the marketplace ShareHolding,
-/// where transfers check it, so the mirror goes through a CPI signed by this
-/// program's `cpi-auth` PDA.
+/// their old and new vote, under the given reason. The lock lives on the
+/// marketplace ShareHolding, where transfers check it, so the mirror goes
+/// through a CPI signed by this program's `cpi-auth` PDA.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn adjust_share_lock<'info>(
     cpi_auth: &AccountInfo<'info>,
     holding: &AccountInfo<'info>,
     cpi_auth_bump: u8,
     asset_id: u64,
     owner: Pubkey,
+    reason: LockReason,
     old_power: u32,
     new_power: u32,
 ) -> Result<()> {
@@ -37,9 +39,9 @@ pub(crate) fn adjust_share_lock<'info>(
         signer_seeds,
     );
     if new_power > old_power {
-        marketplace::cpi::lock_shares(ctx, asset_id, owner, new_power - old_power)
+        marketplace::cpi::lock_shares(ctx, asset_id, owner, reason, new_power - old_power)
     } else if old_power > new_power {
-        marketplace::cpi::unlock_shares(ctx, asset_id, owner, old_power - new_power)
+        marketplace::cpi::unlock_shares(ctx, asset_id, owner, reason, old_power - new_power)
     } else {
         Ok(())
     }
@@ -346,6 +348,7 @@ pub fn vote_on_agent_handler(ctx: Context<VoteOnAgent>, asset_id: u64, amount: u
         ctx.bumps.cpi_auth,
         asset_id,
         ctx.accounts.voter.key(),
+        LockReason::AgentElection,
         record.power,
         amount,
     )?;
@@ -628,6 +631,7 @@ pub fn unlock_agent_votes_handler(
         ctx.bumps.cpi_auth,
         asset_id,
         ctx.accounts.voter.key(),
+        LockReason::AgentElection,
         power,
         0,
     )?;

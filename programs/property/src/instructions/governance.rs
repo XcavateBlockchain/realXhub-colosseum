@@ -14,7 +14,7 @@ use crate::state::{
 use crate::vault::{lock_to_vault, release_from_vault};
 
 use marketplace::program::Marketplace;
-use marketplace::state::{PropertyAsset, ShareHolding};
+use marketplace::state::{LockReason, PropertyAsset, ShareHolding};
 use xcavate_whitelist::state::{Role, RoleAccount};
 
 fn side(tally: &mut Tally, choice: VoteChoice) -> &mut u32 {
@@ -269,6 +269,7 @@ pub fn vote_on_proposal_handler(
         ctx.bumps.cpi_auth,
         asset_id,
         ctx.accounts.voter.key(),
+        LockReason::Proposal,
         record.power,
         amount,
     )?;
@@ -450,6 +451,7 @@ pub fn unlock_proposal_votes_handler<'info>(
         ctx.bumps.cpi_auth,
         asset_id,
         ctx.accounts.voter.key(),
+        LockReason::Proposal,
         power,
         0,
     )?;
@@ -697,6 +699,7 @@ pub fn vote_on_challenge_handler(
         ctx.bumps.cpi_auth,
         asset_id,
         ctx.accounts.voter.key(),
+        LockReason::Challenge,
         record.power,
         amount,
     )?;
@@ -1015,6 +1018,7 @@ pub fn unlock_challenge_votes_handler<'info>(
         ctx.bumps.cpi_auth,
         asset_id,
         ctx.accounts.voter.key(),
+        LockReason::Challenge,
         power,
         0,
     )?;

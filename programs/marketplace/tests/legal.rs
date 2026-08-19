@@ -281,7 +281,7 @@ fn vote_locks_shares_and_revote_moves_power() {
         &spn,
         &[&spn, &a],
     );
-    assert_eq!(holding_of(&svm, 0, &a.pubkey()).locked_amount, 30);
+    assert_eq!(holding_of(&svm, 0, &a.pubkey()).locked(), 30);
     assert_eq!(candidacy_of(&svm, 0, 1, &l1.pubkey()).vote_power, 30);
 
     // Revote to the other candidate: power moves, the lock follows the new
@@ -292,7 +292,7 @@ fn vote_locks_shares_and_revote_moves_power() {
         &spn,
         &[&spn, &a],
     );
-    assert_eq!(holding_of(&svm, 0, &a.pubkey()).locked_amount, 10);
+    assert_eq!(holding_of(&svm, 0, &a.pubkey()).locked(), 10);
     assert_eq!(candidacy_of(&svm, 0, 1, &l1.pubkey()).vote_power, 0);
     assert_eq!(candidacy_of(&svm, 0, 1, &l2.pubkey()).vote_power, 10);
 
@@ -303,7 +303,7 @@ fn vote_locks_shares_and_revote_moves_power() {
         &spn,
         &[&spn, &a],
     );
-    assert_eq!(holding_of(&svm, 0, &a.pubkey()).locked_amount, 15);
+    assert_eq!(holding_of(&svm, 0, &a.pubkey()).locked(), 15);
     assert_eq!(candidacy_of(&svm, 0, 1, &l1.pubkey()).vote_power, 0);
     assert_eq!(candidacy_of(&svm, 0, 1, &l2.pubkey()).vote_power, 15);
 }
@@ -686,7 +686,7 @@ fn unlock_waits_for_the_election() {
 
     warp(&mut svm, 10_001);
     ok(&mut svm, unlock_votes_ix(&a.pubkey(), 0, 1), &a, &[&a]);
-    assert_eq!(holding_of(&svm, 0, &a.pubkey()).locked_amount, 0);
+    assert_eq!(holding_of(&svm, 0, &a.pubkey()).locked(), 0);
     assert!(svm
         .get_account(&lawyer_vote_pda(0, 1, &a.pubkey()))
         .is_none_or(|acc| acc.data.is_empty()));
@@ -936,7 +936,7 @@ fn revote_rejects_a_surplus_candidacy() {
         &[&spn, &a],
     );
     assert_eq!(candidacy_of(&svm, 0, 1, &lawyer.pubkey()).vote_power, 10);
-    assert_eq!(holding_of(&svm, 0, &a.pubkey()).locked_amount, 10);
+    assert_eq!(holding_of(&svm, 0, &a.pubkey()).locked(), 10);
 }
 
 #[test]

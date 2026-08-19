@@ -339,6 +339,21 @@ pub const PRICE_DECIMALS: u8 = 9;
 pub const MIN_PAYMENT_DECIMALS: u8 = 6;
 pub const MAX_PAYMENT_DECIMALS: u8 = 12;
 
+/// Why shares are locked. Each reason keeps its own counter on the holding
+/// and the effective lock is the largest of them, so backing one vote never
+/// spends weight another kind of vote could still use. Same semantics as
+/// Substrate's per-reason freezes.
+#[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LockReason {
+    LawyerElection,
+    AgentElection,
+    Proposal,
+    Challenge,
+}
+
+/// One lock slot per `LockReason` variant; the two must grow together.
+pub const LOCK_REASONS: usize = 4;
+
 /// The canonical share ledger for one holder of one property. The Token-2022
 /// accounts mirror this; they never lead it.
 #[account]
@@ -347,9 +362,17 @@ pub struct ShareHolding {
     pub asset_id: u64,
     pub owner: Pubkey,
     pub amount: u32,
-    /// Shares locked by votes; blocked from transfer until unlocked.
-    pub locked_amount: u32,
+    /// Shares locked by votes, one counter per `LockReason`. Counters are
+    /// additive within a reason but overlap across reasons.
+    pub locks: [u32; LOCK_REASONS],
     pub bump: u8,
+}
+
+impl ShareHolding {
+    /// The effective lock: shares blocked from transfer until unlocked.
+    pub fn locked(&self) -> u32 {
+        self.locks.into_iter().max().unwrap_or(0)
+    }
 }
 
 /// One investor's stake in a primary listing: what they paid, per component,

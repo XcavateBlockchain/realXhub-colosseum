@@ -395,7 +395,7 @@ fn settle_dead_listing_exit(
         MarketplaceError::LedgerMismatch
     );
     require!(
-        ctx.accounts.holding.locked_amount == 0,
+        ctx.accounts.holding.locked() == 0,
         MarketplaceError::SharesLocked
     );
 

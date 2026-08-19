@@ -234,7 +234,7 @@ fn check_invariants(
         .map(|a| marketplace::state::LawyerVote::try_deserialize(&mut &a.data[..]).unwrap());
     if account_alive(svm, &holding_pda(0, &investors[0].pubkey())) {
         prop_assert_eq!(
-            holding_of(svm, 0, &investors[0].pubkey()).locked_amount,
+            holding_of(svm, 0, &investors[0].pubkey()).locked(),
             record.map(|r| r.power).unwrap_or(0)
         );
     }

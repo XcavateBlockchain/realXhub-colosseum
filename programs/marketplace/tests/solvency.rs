@@ -137,7 +137,7 @@ fn check_invariants(
         }
         if account_alive(svm, &holding_pda(0, &investor.pubkey())) {
             prop_assert_eq!(
-                holding_of(svm, 0, &investor.pubkey()).locked_amount,
+                holding_of(svm, 0, &investor.pubkey()).locked(),
                 record_power
             );
         } else {

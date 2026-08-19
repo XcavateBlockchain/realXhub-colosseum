@@ -5,8 +5,8 @@ use crate::constants::{
 };
 use crate::error::MarketplaceError;
 use crate::state::{
-    DocumentStatus, Lawyer, LawyerCandidacy, LawyerVote, Listing, ListingStatus, PropertyAsset,
-    ShareHolding,
+    DocumentStatus, Lawyer, LawyerCandidacy, LawyerVote, Listing, ListingStatus, LockReason,
+    PropertyAsset, ShareHolding,
 };
 
 use xcavate_whitelist::state::{Role, RoleAccount};
@@ -124,10 +124,10 @@ pub fn vote_on_spv_lawyer_handler(
         MarketplaceError::CandidacyMismatch
     );
 
+    let lock = LockReason::LawyerElection as usize;
     // A revote first takes the old vote back out of its tally and the lock.
     if record.power > 0 {
-        holding.locked_amount = holding
-            .locked_amount
+        holding.locks[lock] = holding.locks[lock]
             .checked_sub(record.power)
             .ok_or(MarketplaceError::Overflow)?;
         if record.choice == choice {
@@ -157,15 +157,14 @@ pub fn vote_on_spv_lawyer_handler(
 
     // The lock can carry leftovers from earlier rounds the voter hasn't
     // unlocked yet, so the new vote must fit next to those too.
-    let locked_after = holding
-        .locked_amount
+    let locked_after = holding.locks[lock]
         .checked_add(amount)
         .ok_or(MarketplaceError::Overflow)?;
     require!(
         locked_after <= holding.amount,
         MarketplaceError::NotEnoughShares
     );
-    holding.locked_amount = locked_after;
+    holding.locks[lock] = locked_after;
     candidacy.vote_power = candidacy
         .vote_power
         .checked_add(amount)
@@ -444,10 +443,8 @@ pub fn unlock_voting_shares_handler(
     require!(!election_live, MarketplaceError::VotingStillOngoing);
 
     let power = ctx.accounts.vote_record.power;
-    ctx.accounts.holding.locked_amount = ctx
-        .accounts
-        .holding
-        .locked_amount
+    let lock = LockReason::LawyerElection as usize;
+    ctx.accounts.holding.locks[lock] = ctx.accounts.holding.locks[lock]
         .checked_sub(power)
         .ok_or(MarketplaceError::Overflow)?;
 

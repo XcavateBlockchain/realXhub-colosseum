@@ -13,7 +13,9 @@ pub use anchor_lang::prelude::Pubkey;
 pub use anchor_lang::solana_program::clock::Clock;
 pub use anchor_lang::AccountDeserialize;
 pub use litesvm::LiteSVM;
-pub use marketplace::state::{Config as MarketConfig, PropertyAsset, ShareHolding};
+pub use marketplace::state::{
+    Config as MarketConfig, LockReason, PropertyAsset, ShareHolding, LOCK_REASONS,
+};
 pub use property::state::{
     AgentCandidacy, AgentElection, AgentVote, Challenge, CheckpointEntry, Config as PropertyConfig,
     GovState, GovVote, IncomeCheckpoint, LettingAgent, PropertyIncome, PropertyLetting, Proposal,
@@ -600,7 +602,7 @@ pub fn seed_holding_with_lock(
     asset_id: u64,
     owner: &Pubkey,
     amount: u32,
-    locked_amount: u32,
+    locked: u32,
 ) {
     let (address, bump) = Pubkey::find_program_address(
         &[
@@ -610,11 +612,15 @@ pub fn seed_holding_with_lock(
         ],
         &mid(),
     );
+    // Which reason carries the seeded lock doesn't matter to any caller; the
+    // election slot is as good as any.
+    let mut locks = [0u32; LOCK_REASONS];
+    locks[LockReason::AgentElection as usize] = locked;
     let holding = ShareHolding {
         asset_id,
         owner: *owner,
         amount,
-        locked_amount,
+        locks,
         bump,
     };
     let mut data = ShareHolding::DISCRIMINATOR.to_vec();

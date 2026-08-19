@@ -256,14 +256,14 @@ fn vote_moves_tally_and_locks_shares() {
     vote(&mut svm, &voter, 1, VoteChoice::Yes, 30);
     let proposal = proposal_of(&svm, ASSET, 1);
     assert_eq!(proposal.tally.yes, 30);
-    assert_eq!(holding_of(&svm, ASSET, &voter.pubkey()).locked_amount, 30);
+    assert_eq!(holding_of(&svm, ASSET, &voter.pubkey()).locked(), 30);
 
     // A revote replaces the old vote and moves the lock by the difference.
     vote(&mut svm, &voter, 1, VoteChoice::No, 20);
     let proposal = proposal_of(&svm, ASSET, 1);
     assert_eq!(proposal.tally.yes, 0);
     assert_eq!(proposal.tally.no, 20);
-    assert_eq!(holding_of(&svm, ASSET, &voter.pubkey()).locked_amount, 20);
+    assert_eq!(holding_of(&svm, ASSET, &voter.pubkey()).locked(), 20);
 }
 
 #[test]
@@ -429,7 +429,7 @@ fn unlock_returns_shares_and_rent() {
         &voter,
         &[&voter],
     );
-    assert_eq!(holding_of(&svm, ASSET, &voter.pubkey()).locked_amount, 0);
+    assert_eq!(holding_of(&svm, ASSET, &voter.pubkey()).locked(), 0);
     assert!(account_gone(
         &svm,
         &proposal_vote_pda(ASSET, 1, &voter.pubkey())
@@ -451,7 +451,7 @@ fn unlock_works_after_the_proposal_closed() {
         &voter,
         &[&voter],
     );
-    assert_eq!(holding_of(&svm, ASSET, &voter.pubkey()).locked_amount, 0);
+    assert_eq!(holding_of(&svm, ASSET, &voter.pubkey()).locked(), 0);
 }
 
 // --- challenges ---
@@ -719,5 +719,54 @@ fn challenge_votes_unlock_after_expiry() {
         &voter,
         &[&voter],
     );
-    assert_eq!(holding_of(&svm, ASSET, &voter.pubkey()).locked_amount, 0);
+    assert_eq!(holding_of(&svm, ASSET, &voter.pubkey()).locked(), 0);
+}
+
+#[test]
+fn proposal_and_challenge_votes_carry_full_weight_at_once() {
+    let (mut svm, admin, agent) = gov_setup();
+    propose(&mut svm, &agent, 1, MID_AMOUNT);
+    let challenger = new_holder(&mut svm, &admin, ASSET, 10);
+    give_xcav(&mut svm, &challenger.pubkey(), FUND_XCAV);
+    challenge(&mut svm, &challenger, 1);
+
+    // Locks per reason overlap instead of adding up, so both votes get the
+    // holder's whole weight and the effective lock stays at their balance.
+    let voter = new_holder(&mut svm, &admin, ASSET, 50);
+    vote(&mut svm, &voter, 1, VoteChoice::Yes, 50);
+    vote_challenge(&mut svm, &voter, 1, VoteChoice::No, 50);
+
+    assert_eq!(proposal_of(&svm, ASSET, 1).tally.yes, 50);
+    assert_eq!(challenge_of(&svm, ASSET, 1).tally.no, 50);
+    let holding = holding_of(&svm, ASSET, &voter.pubkey());
+    assert_eq!(holding.locks[LockReason::Proposal as usize], 50);
+    assert_eq!(holding.locks[LockReason::Challenge as usize], 50);
+    assert_eq!(holding.locked(), 50);
+
+    // Each vote still can't exceed the balance on its own.
+    fails_with(
+        &mut svm,
+        vote_proposal_ix(&voter.pubkey(), ASSET, 1, VoteChoice::Yes, 51),
+        &voter,
+        &[&voter, &sponsor()],
+        "NotEnoughShares",
+    );
+
+    // The unlocks are independent: releasing one vote leaves the other's
+    // lock standing.
+    warp(&mut svm, VOTING_TIME + 1);
+    ok(
+        &mut svm,
+        unlock_proposal_votes_ix(&voter.pubkey(), ASSET, 1),
+        &voter,
+        &[&voter],
+    );
+    assert_eq!(holding_of(&svm, ASSET, &voter.pubkey()).locked(), 50);
+    ok(
+        &mut svm,
+        unlock_challenge_votes_ix(&voter.pubkey(), ASSET, 1),
+        &voter,
+        &[&voter],
+    );
+    assert_eq!(holding_of(&svm, ASSET, &voter.pubkey()).locked(), 0);
 }

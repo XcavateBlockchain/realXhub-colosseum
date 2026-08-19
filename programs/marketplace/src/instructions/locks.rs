@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 
 use crate::constants::{CPI_AUTH_SEED, PROPERTY_PROGRAM, SHARE_SEED};
 use crate::error::MarketplaceError;
-use crate::state::ShareHolding;
+use crate::state::{LockReason, ShareHolding};
 
 /// Share-lock bookkeeping for the property program's elections. The votes
 /// live over there, but a lock only blocks transfers if it sits on the
@@ -29,18 +29,20 @@ pub fn lock_shares_handler(
     ctx: Context<AdjustShareLock>,
     _asset_id: u64,
     _owner: Pubkey,
+    reason: LockReason,
     amount: u32,
 ) -> Result<()> {
     let holding = &mut ctx.accounts.holding;
-    let locked_after = holding
-        .locked_amount
+    let locked_after = holding.locks[reason as usize]
         .checked_add(amount)
         .ok_or(MarketplaceError::Overflow)?;
+    // Each reason is capped by the balance on its own; other reasons don't
+    // count against it.
     require!(
         locked_after <= holding.amount,
         MarketplaceError::NotEnoughShares
     );
-    holding.locked_amount = locked_after;
+    holding.locks[reason as usize] = locked_after;
     Ok(())
 }
 
@@ -48,11 +50,11 @@ pub fn unlock_shares_handler(
     ctx: Context<AdjustShareLock>,
     _asset_id: u64,
     _owner: Pubkey,
+    reason: LockReason,
     amount: u32,
 ) -> Result<()> {
     let holding = &mut ctx.accounts.holding;
-    holding.locked_amount = holding
-        .locked_amount
+    holding.locks[reason as usize] = holding.locks[reason as usize]
         .checked_sub(amount)
         .ok_or(MarketplaceError::Overflow)?;
     Ok(())
