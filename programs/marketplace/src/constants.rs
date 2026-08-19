@@ -62,3 +62,15 @@ pub const OFFER_SEED: &[u8] = b"offer";
 
 #[constant]
 pub const OFFER_VAULT_SEED: &[u8] = b"offer-vault";
+
+/// The Metaplex Core program the deed CPIs target.
+pub const MPL_CORE_PROGRAM: Pubkey = pubkey!("CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d");
+
+#[constant]
+pub const CORE_ASSET_SEED: &[u8] = b"core-asset";
+
+#[constant]
+pub const CORE_COLLECTION_SEED: &[u8] = b"core-collection";
+
+#[constant]
+pub const CORE_AUTH_SEED: &[u8] = b"core-auth";

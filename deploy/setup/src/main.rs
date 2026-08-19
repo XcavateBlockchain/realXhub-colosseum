@@ -601,6 +601,45 @@ fn main() {
         );
     }
 
+    // --- the region's Core collection, so listings can mint their deeds ---
+    let core_collection = Pubkey::find_program_address(
+        &[marketplace::CORE_COLLECTION_SEED, &REGION_ID.to_le_bytes()],
+        &marketplace::ID,
+    )
+    .0;
+    if ctx.exists(&core_collection) {
+        println!("  - region collection already created");
+    } else {
+        ctx.send(
+            "create region collection",
+            Instruction::new_with_bytes(
+                marketplace::ID,
+                &marketplace::instruction::CreateRegionCollection {
+                    region_id: REGION_ID,
+                    name: format!("realXmarket region {REGION_ID}"),
+                    uri: String::new(),
+                }
+                .data(),
+                marketplace::accounts::CreateRegionCollection {
+                    authority: authority.pubkey(),
+                    config: marketplace_config(),
+                    region: region_pda(REGION_ID),
+                    core_collection,
+                    core_auth: Pubkey::find_program_address(
+                        &[marketplace::CORE_AUTH_SEED],
+                        &marketplace::ID,
+                    )
+                    .0,
+                    mpl_core_program: marketplace::MPL_CORE_PROGRAM,
+                    system_program: SYS,
+                }
+                .to_account_metas(None),
+            ),
+            &authority,
+            &[&authority],
+        );
+    }
+
     // --- lawyers join the registry ---
     println!("lawyers");
     for (name, lawyer) in [("lawyer1", &lawyer1), ("lawyer2", &lawyer2)] {

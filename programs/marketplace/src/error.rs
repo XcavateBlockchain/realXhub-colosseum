@@ -240,4 +240,13 @@ pub enum MarketplaceError {
     /// Only the offer's maker may act on it.
     #[msg("Caller did not make this offer")]
     WrongOfferor,
+    /// A pinned program account does not match the expected address.
+    #[msg("Wrong program account")]
+    WrongProgram,
+    /// The asset name or metadata URI is empty or too long.
+    #[msg("Invalid asset name or URI")]
+    InvalidAssetMetadata,
+    /// The region's Core collection has not been created yet.
+    #[msg("Region collection does not exist")]
+    CollectionMissing,
 }

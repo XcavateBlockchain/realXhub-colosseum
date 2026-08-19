@@ -455,7 +455,7 @@ pub struct BuyRelistedShares<'info> {
 
     /// CHECK: the property program the settlements CPI into, pinned by
     /// address.
-    #[account(address = PROPERTY_PROGRAM @ MarketplaceError::WrongPayee)]
+    #[account(address = PROPERTY_PROGRAM @ MarketplaceError::WrongProgram)]
     pub property_program: UncheckedAccount<'info>,
 
     /// The payment mint's token program (classic or Token-2022).
@@ -821,7 +821,7 @@ pub struct SendShares<'info> {
 
     /// CHECK: the property program the settlements CPI into, pinned by
     /// address.
-    #[account(address = PROPERTY_PROGRAM @ MarketplaceError::WrongPayee)]
+    #[account(address = PROPERTY_PROGRAM @ MarketplaceError::WrongProgram)]
     pub property_program: UncheckedAccount<'info>,
 
     pub share_token_program: Program<'info, Token2022>,

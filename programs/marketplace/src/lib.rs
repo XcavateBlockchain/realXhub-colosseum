@@ -5,6 +5,7 @@
 //! are paid in the accepted payment mints.
 
 pub mod constants;
+pub mod deed;
 pub mod error;
 pub mod instructions;
 pub mod mint_guard;
@@ -81,8 +82,22 @@ pub mod marketplace {
         listing::upgrade_object_handler(ctx, listing_id, new_price)
     }
 
-    pub fn init_property_assets(ctx: Context<InitPropertyAssets>, listing_id: u64) -> Result<()> {
-        assets::init_property_assets_handler(ctx, listing_id)
+    pub fn create_region_collection(
+        ctx: Context<CreateRegionCollection>,
+        region_id: u16,
+        name: String,
+        uri: String,
+    ) -> Result<()> {
+        assets::create_region_collection_handler(ctx, region_id, name, uri)
+    }
+
+    pub fn init_property_assets(
+        ctx: Context<InitPropertyAssets>,
+        listing_id: u64,
+        name: String,
+        uri: String,
+    ) -> Result<()> {
+        assets::init_property_assets_handler(ctx, listing_id, name, uri)
     }
 
     pub fn buy_property_shares(

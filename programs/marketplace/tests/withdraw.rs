@@ -615,6 +615,10 @@ fn close_dead_listing_sweeps_donated_dust() {
     assert!(svm
         .get_account(&listing_payment_ata(0))
         .is_none_or(|acc| acc.data.is_empty()));
+    // The deed burned with the property; Core leaves a one-byte
+    // uninitialized marker behind.
+    let deed = svm.get_account(&core_asset_pda(0)).unwrap();
+    assert_eq!(deed.data, vec![0]);
     let treasury_acc = svm.get_account(&treasury_payment_ata()).unwrap();
     let state: anchor_spl::token::spl_token::state::Account =
         anchor_lang::solana_program::program_pack::Pack::unpack(&treasury_acc.data).unwrap();

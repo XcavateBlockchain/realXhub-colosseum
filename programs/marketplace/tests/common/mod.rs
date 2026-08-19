@@ -610,7 +610,15 @@ pub fn seed_region(svm: &mut LiteSVM, region_id: u16, owner: &Pubkey) {
     seed_region_taxed(svm, region_id, owner, 300)
 }
 
+/// Region plus its Core collection; every listing flow needs both, so this
+/// is the default. `seed_region_bare` leaves the collection out for the
+/// `create_region_collection` tests.
 pub fn seed_region_taxed(svm: &mut LiteSVM, region_id: u16, owner: &Pubkey, tax_bps: u16) {
+    seed_region_bare(svm, region_id, owner, tax_bps);
+    seed_core_collection(svm, region_id);
+}
+
+pub fn seed_region_bare(svm: &mut LiteSVM, region_id: u16, owner: &Pubkey, tax_bps: u16) {
     let (address, bump) = Pubkey::find_program_address(
         &[regions::REGION_SEED, &region_id.to_le_bytes()],
         &regions::id(),
@@ -782,9 +790,30 @@ pub fn upgrade_ix(developer: &Pubkey, listing_id: u64, new_price: u64) -> Instru
 }
 
 pub fn init_assets_ix(developer: &Pubkey, listing_id: u64) -> Instruction {
+    init_assets_ix_full(
+        developer,
+        listing_id,
+        1,
+        "10 Test Street".into(),
+        "ipfs://property-docs".into(),
+    )
+}
+
+pub fn init_assets_ix_full(
+    developer: &Pubkey,
+    listing_id: u64,
+    region_id: u16,
+    name: String,
+    uri: String,
+) -> Instruction {
     Instruction::new_with_bytes(
         mid(),
-        &marketplace::instruction::InitPropertyAssets { listing_id }.data(),
+        &marketplace::instruction::InitPropertyAssets {
+            listing_id,
+            name,
+            uri,
+        }
+        .data(),
         marketplace::accounts::InitPropertyAssets {
             developer: *developer,
             developer_role: role_pda(developer, Role::RealEstateDeveloper),
@@ -794,8 +823,39 @@ pub fn init_assets_ix(developer: &Pubkey, listing_id: u64) -> Instruction {
             mint_auth: mint_auth_pda(listing_id),
             property_vault: property_vault_pda(listing_id),
             vault_share_account: vault_share_account(listing_id),
+            core_asset: core_asset_pda(listing_id),
+            core_collection: core_collection_pda(region_id),
+            core_auth: core_auth_pda(),
+            mpl_core_program: mpl_core::ID,
             token_program: anchor_spl::token_2022::ID,
             associated_token_program: anchor_spl::associated_token::ID,
+            system_program: SYS,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn create_collection_ix(
+    authority: &Pubkey,
+    region_id: u16,
+    name: &str,
+    uri: &str,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        mid(),
+        &marketplace::instruction::CreateRegionCollection {
+            region_id,
+            name: name.into(),
+            uri: uri.into(),
+        }
+        .data(),
+        marketplace::accounts::CreateRegionCollection {
+            authority: *authority,
+            config: marketplace_config(),
+            region: region_pda(region_id),
+            core_collection: core_collection_pda(region_id),
+            core_auth: core_auth_pda(),
+            mpl_core_program: mpl_core::ID,
             system_program: SYS,
         }
         .to_account_metas(None),
@@ -1351,6 +1411,9 @@ pub fn close_dead_listing_ix(
         mint_auth: mint_auth_pda(listing_id),
         property_vault: property_vault_pda(listing_id),
         vault_share_account: with_mint.then(|| vault_share_account(listing_id)),
+        core_asset: with_mint.then(|| core_asset_pda(listing_id)),
+        core_collection: with_mint.then(|| core_collection_pda(1)),
+        mpl_core_program: with_mint.then_some(mpl_core::ID),
         listing_vault: listing_vault_pda(listing_id),
         share_token_program: anchor_spl::token_2022::ID,
         payment_token_program: TOKEN_PROGRAM_ID,
@@ -1846,6 +1909,58 @@ pub fn warp(svm: &mut LiteSVM, secs: i64) {
 // Reads a program binary from target/deploy at runtime rather than via
 // include_bytes!, so the test crates compile on a fresh clone where the .so
 // files don't exist yet (anchor's IDL pass compiles tests too).
+pub fn core_asset_pda(listing_id: u64) -> Pubkey {
+    Pubkey::find_program_address(
+        &[marketplace::CORE_ASSET_SEED, &listing_id.to_le_bytes()],
+        &mid(),
+    )
+    .0
+}
+pub fn core_collection_pda(region_id: u16) -> Pubkey {
+    Pubkey::find_program_address(
+        &[marketplace::CORE_COLLECTION_SEED, &region_id.to_le_bytes()],
+        &mid(),
+    )
+    .0
+}
+pub fn core_auth_pda() -> Pubkey {
+    Pubkey::find_program_address(&[marketplace::CORE_AUTH_SEED], &mid()).0
+}
+
+/// The Metaplex Core binary is a fixture (dumped from devnet, see the
+/// fixtures directory), not a workspace build product.
+pub fn mpl_core_bytes() -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mpl_core.so");
+    std::fs::read(&path).unwrap_or_else(|_| panic!("{} missing", path.display()))
+}
+
+/// Write a region's Core collection directly, so listing flows don't each
+/// have to run `create_region_collection`; the instruction has its own
+/// tests.
+pub fn seed_core_collection(svm: &mut LiteSVM, region_id: u16) {
+    let collection = mpl_core::accounts::BaseCollectionV1 {
+        key: mpl_core::types::Key::CollectionV1,
+        update_authority: core_auth_pda(),
+        name: format!("region {region_id}"),
+        uri: String::new(),
+        num_minted: 0,
+        current_size: 0,
+    };
+    let mut data = vec![];
+    collection.serialize(&mut data).unwrap();
+    svm.set_account(
+        core_collection_pda(region_id),
+        Account {
+            lamports: 100_000_000,
+            data,
+            owner: mpl_core::ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+    )
+    .unwrap();
+}
+
 pub fn program_bytes(name: &str) -> Vec<u8> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/deploy")
@@ -1863,6 +1978,7 @@ pub fn setup() -> (LiteSVM, Keypair, Keypair) {
         .unwrap();
     svm.add_program(mid(), &program_bytes("marketplace"))
         .unwrap();
+    svm.add_program(mpl_core::ID, &mpl_core_bytes()).unwrap();
     set_mint(&mut svm);
     // The treasury's XCAV account, where the abandonment slash lands.
     set_token_account_for(

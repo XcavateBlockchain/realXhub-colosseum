@@ -15,6 +15,7 @@ solana-signer = "3.0.0"
 solana-keypair = "3.0.1"
 solana-account = "3.0.0"
 proptest = "1.11"
+mpl-core = "0.12.1"
 
 [profile.release]
 overflow-checks = true

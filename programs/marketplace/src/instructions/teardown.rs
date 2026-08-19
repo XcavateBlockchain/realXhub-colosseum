@@ -9,9 +9,10 @@ use anchor_spl::token_interface::{
 };
 
 use crate::constants::{
-    CONFIG_SEED, LISTING_SEED, LISTING_VAULT_SEED, MINT_AUTH_SEED, PROPERTY_SEED,
-    PROPERTY_VAULT_SEED,
+    CONFIG_SEED, CORE_COLLECTION_SEED, LISTING_SEED, LISTING_VAULT_SEED, MINT_AUTH_SEED,
+    MPL_CORE_PROGRAM, PROPERTY_SEED, PROPERTY_VAULT_SEED,
 };
+use crate::deed;
 use crate::error::MarketplaceError;
 use crate::state::{Config, Listing, ListingStatus, PropertyAsset};
 
@@ -32,6 +33,8 @@ use crate::state::{Config, Listing, ListingStatus, PropertyAsset};
 #[derive(Accounts)]
 #[instruction(listing_id: u64)]
 pub struct CloseDeadListing<'info> {
+    /// Receives the Core asset's rent when there is one to burn.
+    #[account(mut)]
     pub cranker: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
@@ -65,6 +68,22 @@ pub struct CloseDeadListing<'info> {
     /// before the mint existed.
     #[account(mut, address = property.share_mint @ MarketplaceError::InvalidMint)]
     pub share_mint: Option<UncheckedAccount<'info>>,
+
+    /// CHECK: the property's Core asset; absent together with the mint.
+    #[account(mut, address = property.core_asset @ MarketplaceError::WrongVaultAccount)]
+    pub core_asset: Option<UncheckedAccount<'info>>,
+
+    /// CHECK: the region's Core collection the asset burns out of.
+    #[account(
+        mut,
+        seeds = [CORE_COLLECTION_SEED, &property.region_id.to_le_bytes()],
+        bump,
+    )]
+    pub core_collection: Option<UncheckedAccount<'info>>,
+
+    /// CHECK: the Metaplex Core program, pinned by address.
+    #[account(address = MPL_CORE_PROGRAM @ MarketplaceError::WrongProgram)]
+    pub mpl_core_program: Option<UncheckedAccount<'info>>,
 
     /// CHECK: the share mint's authority PDA; signs the mint close.
     #[account(seeds = [MINT_AUTH_SEED, &listing_id.to_le_bytes()], bump)]
@@ -131,6 +150,47 @@ pub fn close_dead_listing_handler<'info>(
     let vault_seeds: &[&[u8]] = &[PROPERTY_VAULT_SEED, &id_bytes, &[ctx.bumps.property_vault]];
     let listing_vault_seeds: &[&[u8]] =
         &[LISTING_VAULT_SEED, &id_bytes, &[ctx.bumps.listing_vault]];
+
+    // The deed burns with the property; it only exists if the listing ever
+    // reached step two.
+    if ctx.accounts.property.core_asset != Pubkey::default() {
+        let core_asset = ctx
+            .accounts
+            .core_asset
+            .as_ref()
+            .ok_or(MarketplaceError::WrongVaultAccount)?;
+        let core_collection = ctx
+            .accounts
+            .core_collection
+            .as_ref()
+            .ok_or(MarketplaceError::WrongVaultAccount)?;
+        let core_program = ctx
+            .accounts
+            .mpl_core_program
+            .as_ref()
+            .ok_or(MarketplaceError::WrongProgram)?;
+        deed::invoke_core(
+            deed::burn_asset_data(),
+            deed::burn_asset_metas(
+                core_asset.key(),
+                core_collection.key(),
+                ctx.accounts.cranker.key(),
+                ctx.accounts.property_vault.key(),
+            ),
+            &[
+                core_asset.to_account_info(),
+                core_collection.to_account_info(),
+                ctx.accounts.cranker.to_account_info(),
+                ctx.accounts.property_vault.to_account_info(),
+                core_program.to_account_info(),
+            ],
+            &[&[
+                PROPERTY_VAULT_SEED,
+                &listing_id.to_le_bytes(),
+                &[ctx.bumps.property_vault],
+            ]],
+        )?;
+    }
 
     // The mint half only exists if the listing ever reached step two.
     if ctx.accounts.property.share_mint != Pubkey::default() {

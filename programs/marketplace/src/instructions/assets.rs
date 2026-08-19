@@ -18,10 +18,12 @@ use anchor_spl::token_2022_extensions::{
 };
 
 use crate::constants::{
-    LISTING_SEED, MINT_AUTH_SEED, PROPERTY_SEED, PROPERTY_VAULT_SEED, SHARE_MINT_SEED,
+    CONFIG_SEED, CORE_ASSET_SEED, CORE_AUTH_SEED, CORE_COLLECTION_SEED, LISTING_SEED,
+    MINT_AUTH_SEED, MPL_CORE_PROGRAM, PROPERTY_SEED, PROPERTY_VAULT_SEED, SHARE_MINT_SEED,
 };
+use crate::deed;
 use crate::error::MarketplaceError;
-use crate::state::{Listing, ListingStatus, PropertyAsset};
+use crate::state::{Config, Listing, ListingStatus, PropertyAsset};
 
 use xcavate_whitelist::state::{Role, RoleAccount};
 
@@ -93,14 +95,42 @@ pub struct InitPropertyAssets<'info> {
     #[account(mut)]
     pub vault_share_account: UncheckedAccount<'info>,
 
+    /// CHECK: the property's Core asset PDA; the Core program creates it.
+    #[account(mut, seeds = [CORE_ASSET_SEED, &listing_id.to_le_bytes()], bump)]
+    pub core_asset: UncheckedAccount<'info>,
+
+    /// CHECK: the region's Core collection, created up front by the
+    /// authority; the seeds tie it to the property's region.
+    #[account(
+        mut,
+        seeds = [CORE_COLLECTION_SEED, &property.region_id.to_le_bytes()],
+        bump,
+    )]
+    pub core_collection: UncheckedAccount<'info>,
+
+    /// CHECK: update authority of every region collection; a bare PDA the
+    /// program signs asset creation with.
+    #[account(seeds = [CORE_AUTH_SEED], bump)]
+    pub core_auth: UncheckedAccount<'info>,
+
+    /// CHECK: the Metaplex Core program, pinned by address.
+    #[account(address = MPL_CORE_PROGRAM @ MarketplaceError::WrongProgram)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
     pub token_program: Program<'info, Token2022>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
 }
 
+/// Longest name and metadata URI a property's Core asset may carry.
+pub const MAX_ASSET_NAME_LEN: usize = 40;
+pub const MAX_ASSET_URI_LEN: usize = 200;
+
 pub fn init_property_assets_handler(
     ctx: Context<InitPropertyAssets>,
     listing_id: u64,
+    name: String,
+    uri: String,
 ) -> Result<()> {
     let listing = &ctx.accounts.listing;
     require!(
@@ -111,13 +141,21 @@ pub fn init_property_assets_handler(
         Clock::get()?.unix_timestamp < listing.listing_expiry,
         MarketplaceError::ListingExpired
     );
+    require!(
+        !name.is_empty() && name.len() <= MAX_ASSET_NAME_LEN,
+        MarketplaceError::InvalidAssetMetadata
+    );
+    require!(
+        !uri.is_empty() && uri.len() <= MAX_ASSET_URI_LEN,
+        MarketplaceError::InvalidAssetMetadata
+    );
 
     let id_bytes = listing_id.to_le_bytes();
     let mint_seeds: &[&[u8]] = &[SHARE_MINT_SEED, &id_bytes, &[ctx.bumps.share_mint]];
     let auth_seeds: &[&[u8]] = &[MINT_AUTH_SEED, &id_bytes, &[ctx.bumps.mint_auth]];
 
-    // Create the mint account sized for its two extensions, then initialize
-    // the extensions (they must precede the mint itself).
+    // Create the mint account sized for its three extensions, then
+    // initialize the extensions (they must precede the mint itself).
     let space = ExtensionType::try_calculate_account_len::<MintState>(&[
         ExtensionType::DefaultAccountState,
         ExtensionType::PermanentDelegate,
@@ -270,20 +308,144 @@ pub fn init_property_assets_handler(
         None,
     )?;
 
+    // The deed side: one Core asset per property, held by the property
+    // vault inside its region's collection, its URI naming the property's
+    // documents on IPFS. The collection is created up front by the
+    // authority, so region branding never rides a developer's transaction.
+    require!(
+        !ctx.accounts.core_collection.data_is_empty(),
+        MarketplaceError::CollectionMissing
+    );
+    let asset_seeds: &[&[u8]] = &[CORE_ASSET_SEED, &id_bytes, &[ctx.bumps.core_asset]];
+    let core_auth_seeds: &[&[u8]] = &[CORE_AUTH_SEED, &[ctx.bumps.core_auth]];
+    deed::invoke_core(
+        deed::create_asset_data(&name, &uri)?,
+        deed::create_asset_metas(
+            ctx.accounts.core_asset.key(),
+            ctx.accounts.core_collection.key(),
+            ctx.accounts.core_auth.key(),
+            ctx.accounts.developer.key(),
+            ctx.accounts.property_vault.key(),
+        ),
+        &[
+            ctx.accounts.core_asset.to_account_info(),
+            ctx.accounts.core_collection.to_account_info(),
+            ctx.accounts.core_auth.to_account_info(),
+            ctx.accounts.developer.to_account_info(),
+            ctx.accounts.property_vault.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+        ],
+        &[asset_seeds, core_auth_seeds],
+    )?;
+
+    ctx.accounts.property.core_asset = ctx.accounts.core_asset.key();
     ctx.accounts.property.share_mint = ctx.accounts.share_mint.key();
     ctx.accounts.listing.status = ListingStatus::Listed;
 
     emit!(PropertyAssetsInitialized {
         listing_id,
+        core_asset: ctx.accounts.property.core_asset,
         share_mint: ctx.accounts.property.share_mint,
         share_amount: ctx.accounts.property.share_amount,
     });
     Ok(())
 }
 
+/// Create a region's Core collection, the on-chain grouping every property
+/// asset in the region mints into. Authority-only, once per region, before
+/// the region's first listing reaches `init_property_assets`.
+#[derive(Accounts)]
+#[instruction(region_id: u16)]
+pub struct CreateRegionCollection<'info> {
+    #[account(
+        mut,
+        address = config.authority @ MarketplaceError::NotAuthority,
+    )]
+    pub authority: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+
+    /// The region, owned by the regions program; its existence is what makes
+    /// the id worth a collection.
+    #[account(
+        seeds = [regions::REGION_SEED, &region_id.to_le_bytes()],
+        bump = region.bump,
+        seeds::program = regions::ID,
+    )]
+    pub region: Box<Account<'info, regions::state::Region>>,
+
+    /// CHECK: the region's Core collection PDA; the Core program creates it.
+    #[account(mut, seeds = [CORE_COLLECTION_SEED, &region_id.to_le_bytes()], bump)]
+    pub core_collection: UncheckedAccount<'info>,
+
+    /// CHECK: update authority of every region collection; a bare PDA.
+    #[account(seeds = [CORE_AUTH_SEED], bump)]
+    pub core_auth: UncheckedAccount<'info>,
+
+    /// CHECK: the Metaplex Core program, pinned by address.
+    #[account(address = MPL_CORE_PROGRAM @ MarketplaceError::WrongProgram)]
+    pub mpl_core_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+pub fn create_region_collection_handler(
+    ctx: Context<CreateRegionCollection>,
+    region_id: u16,
+    name: String,
+    uri: String,
+) -> Result<()> {
+    require!(
+        !name.is_empty() && name.len() <= MAX_ASSET_NAME_LEN,
+        MarketplaceError::InvalidAssetMetadata
+    );
+    require!(
+        uri.len() <= MAX_ASSET_URI_LEN,
+        MarketplaceError::InvalidAssetMetadata
+    );
+
+    let region_bytes = region_id.to_le_bytes();
+    let collection_seeds: &[&[u8]] = &[
+        CORE_COLLECTION_SEED,
+        &region_bytes,
+        &[ctx.bumps.core_collection],
+    ];
+    deed::invoke_core(
+        deed::create_collection_data(&name, &uri)?,
+        deed::create_collection_metas(
+            ctx.accounts.core_collection.key(),
+            ctx.accounts.core_auth.key(),
+            ctx.accounts.authority.key(),
+        ),
+        &[
+            ctx.accounts.core_collection.to_account_info(),
+            ctx.accounts.core_auth.to_account_info(),
+            ctx.accounts.authority.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.mpl_core_program.to_account_info(),
+        ],
+        &[collection_seeds],
+    )?;
+
+    emit!(RegionCollectionCreated {
+        region_id,
+        collection: ctx.accounts.core_collection.key(),
+    });
+    Ok(())
+}
+
+#[event]
+pub struct RegionCollectionCreated {
+    pub region_id: u16,
+    pub collection: Pubkey,
+}
+
 #[event]
 pub struct PropertyAssetsInitialized {
     pub listing_id: u64,
+    pub core_asset: Pubkey,
     pub share_mint: Pubkey,
     pub share_amount: u32,
 }
