@@ -140,6 +140,10 @@ pub fn distribute_income_handler(
 ) -> Result<()> {
     require!(amount > 0, PropertyError::ZeroDistribution);
     require!(
+        ctx.accounts.property.finalized,
+        PropertyError::PropertyNotFinalized
+    );
+    require!(
         ctx.accounts.letting.agent == ctx.accounts.agent.key(),
         PropertyError::NotAssignedAgent
     );

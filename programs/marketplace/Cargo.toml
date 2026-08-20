@@ -28,7 +28,6 @@ regions = { path = "../regions", features = ["no-entrypoint"] }
 
 [dev-dependencies]
 property = { path = "../property" }
-mpl-core = { workspace = true }
 litesvm = { workspace = true }
 solana-message = { workspace = true }
 solana-transaction = { workspace = true }

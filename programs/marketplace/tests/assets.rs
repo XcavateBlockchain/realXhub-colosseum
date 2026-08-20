@@ -145,10 +145,10 @@ fn init_assets_requires_compliant_developer() {
     );
 }
 
-// --- Core asset and region collections ---
+// --- property metadata ---
 
 #[test]
-fn init_assets_mints_the_property_deed() {
+fn init_assets_records_the_metadata() {
     let (mut svm, _admin, _sponsor, developer) = setup_pending();
     ok(
         &mut svm,
@@ -156,42 +156,9 @@ fn init_assets_mints_the_property_deed() {
         &developer,
         &[&developer],
     );
-
-    assert_eq!(property_of(&svm, 0).core_asset, core_asset_pda(0));
-    let acc = svm.get_account(&core_asset_pda(0)).unwrap();
-    assert_eq!(acc.owner, mpl_core::ID);
-    let asset = mpl_core::accounts::BaseAssetV1::from_bytes(&acc.data).unwrap();
-    assert_eq!(asset.owner, property_vault_pda(0));
-    assert_eq!(
-        asset.update_authority,
-        mpl_core::types::UpdateAuthority::Collection(core_collection_pda(1))
-    );
-    assert_eq!(asset.name, "10 Test Street");
-    assert_eq!(asset.uri, "ipfs://property-docs");
-}
-
-#[test]
-fn init_assets_needs_the_region_collection() {
-    let (mut svm, _admin, _sponsor, developer) = setup_pending();
-    // Blank out the collection the region seeding provided.
-    svm.set_account(
-        core_collection_pda(1),
-        solana_account::Account {
-            lamports: 0,
-            data: vec![],
-            owner: SYS,
-            executable: false,
-            rent_epoch: 0,
-        },
-    )
-    .unwrap();
-    fails_with(
-        &mut svm,
-        init_assets_ix(&developer.pubkey(), 0),
-        &developer,
-        &[&developer],
-        "CollectionMissing",
-    );
+    let property = property_of(&svm, 0);
+    assert_eq!(property.name, "10 Test Street");
+    assert_eq!(property.metadata_uri, "ipfs://property-docs");
 }
 
 #[test]
@@ -199,137 +166,23 @@ fn init_assets_validates_the_metadata() {
     let (mut svm, _admin, _sponsor, developer) = setup_pending();
     fails_with(
         &mut svm,
-        init_assets_ix_full(&developer.pubkey(), 0, 1, "".into(), "ipfs://x".into()),
+        init_assets_ix_full(&developer.pubkey(), 0, "".into(), "ipfs://x".into()),
         &developer,
         &[&developer],
         "InvalidAssetMetadata",
     );
     fails_with(
         &mut svm,
-        init_assets_ix_full(&developer.pubkey(), 0, 1, "x".repeat(41), "ipfs://x".into()),
+        init_assets_ix_full(&developer.pubkey(), 0, "x".repeat(41), "ipfs://x".into()),
         &developer,
         &[&developer],
         "InvalidAssetMetadata",
     );
     fails_with(
         &mut svm,
-        init_assets_ix_full(&developer.pubkey(), 0, 1, "ok".into(), "u".repeat(201)),
+        init_assets_ix_full(&developer.pubkey(), 0, "ok".into(), "u".repeat(201)),
         &developer,
         &[&developer],
         "InvalidAssetMetadata",
-    );
-}
-
-#[test]
-fn create_region_collection_is_authority_only() {
-    let (mut svm, admin, _authority) = setup();
-    let operator = funded(&mut svm);
-    // A bare region: no collection yet.
-    seed_region_bare(&mut svm, 5, &operator.pubkey(), 300);
-
-    fails_with(
-        &mut svm,
-        create_collection_ix(&admin.pubkey(), 5, "region five", "ipfs://region"),
-        &admin,
-        &[&admin],
-        "NotAuthority",
-    );
-}
-
-#[test]
-fn create_region_collection_creates_and_refuses_twice() {
-    let (mut svm, _admin, authority) = setup();
-    let operator = funded(&mut svm);
-    seed_region_bare(&mut svm, 5, &operator.pubkey(), 300);
-
-    ok(
-        &mut svm,
-        create_collection_ix(&authority.pubkey(), 5, "region five", "ipfs://region"),
-        &authority,
-        &[&authority],
-    );
-    let acc = svm.get_account(&core_collection_pda(5)).unwrap();
-    let collection = mpl_core::accounts::BaseCollectionV1::from_bytes(&acc.data).unwrap();
-    assert_eq!(collection.update_authority, core_auth_pda());
-    assert_eq!(collection.name, "region five");
-    assert_eq!(collection.uri, "ipfs://region");
-
-    // The Core program refuses to create over a live collection.
-    fails_with(
-        &mut svm,
-        create_collection_ix(&authority.pubkey(), 5, "again", "ipfs://again"),
-        &authority,
-        &[&authority],
-        "already in use",
-    );
-}
-
-#[test]
-fn create_region_collection_needs_the_region() {
-    let (mut svm, _admin, authority) = setup();
-    fails_with(
-        &mut svm,
-        create_collection_ix(&authority.pubkey(), 9, "ghost", "ipfs://ghost"),
-        &authority,
-        &[&authority],
-        "AccountNotInitialized",
-    );
-}
-
-/// The deed CPIs are hand-encoded (the mpl-core crate stays out of the
-/// on-chain build); these pin every byte and meta against the crate's own
-/// builders, so upstream drift fails here instead of on devnet.
-#[test]
-fn deed_encodings_match_the_mpl_core_crate() {
-    let a = Pubkey::new_unique();
-    let b = Pubkey::new_unique();
-    let c = Pubkey::new_unique();
-    let d = Pubkey::new_unique();
-    let e = Pubkey::new_unique();
-
-    let expected = mpl_core::instructions::CreateCollectionV2Builder::new()
-        .collection(a)
-        .update_authority(Some(b))
-        .payer(c)
-        .name("n".into())
-        .uri("u".into())
-        .instruction();
-    assert_eq!(
-        marketplace::deed::create_collection_data("n", "u").unwrap(),
-        expected.data
-    );
-    assert_eq!(
-        marketplace::deed::create_collection_metas(a, b, c),
-        expected.accounts
-    );
-
-    let expected = mpl_core::instructions::CreateV2Builder::new()
-        .asset(a)
-        .collection(Some(b))
-        .authority(Some(c))
-        .payer(d)
-        .owner(Some(e))
-        .name("n".into())
-        .uri("u".into())
-        .instruction();
-    assert_eq!(
-        marketplace::deed::create_asset_data("n", "u").unwrap(),
-        expected.data
-    );
-    assert_eq!(
-        marketplace::deed::create_asset_metas(a, b, c, d, e),
-        expected.accounts
-    );
-
-    let expected = mpl_core::instructions::BurnV1Builder::new()
-        .asset(a)
-        .collection(Some(b))
-        .payer(c)
-        .authority(Some(d))
-        .instruction();
-    assert_eq!(marketplace::deed::burn_asset_data(), expected.data);
-    assert_eq!(
-        marketplace::deed::burn_asset_metas(a, b, c, d),
-        expected.accounts
     );
 }

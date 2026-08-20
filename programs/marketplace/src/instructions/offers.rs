@@ -22,7 +22,7 @@ use crate::error::MarketplaceError;
 use crate::instructions::buy::{bps_of, scale_to_mint};
 use crate::instructions::secondary::{move_shares, settle_income};
 use crate::state::{
-    Config, Listing, Offer, PropertyAsset, ShareHolding, ShareListing, LOCK_REASONS,
+    Config, Listing, ListingStatus, Offer, PropertyAsset, ShareHolding, ShareListing, LOCK_REASONS,
     MIN_PAYMENT_DECIMALS, PRICE_DECIMALS,
 };
 
@@ -176,6 +176,10 @@ pub fn make_offer_handler(
     );
     let share_listing = &mut ctx.accounts.share_listing;
     require!(
+        ctx.accounts.offeror.key() != share_listing.seller,
+        MarketplaceError::SelfOffer
+    );
+    require!(
         amount <= share_listing.amount,
         MarketplaceError::NotEnoughSharesListed
     );
@@ -311,6 +315,10 @@ pub struct AcceptOffer<'info> {
 
     /// CHECK: the bidder; bound to the offer by its seeds.
     pub offeror: UncheckedAccount<'info>,
+
+    /// CHECK: the bidder's investor role; derived and checked in the
+    /// handler (stack room), and compliance must still hold at delivery.
+    pub offeror_role: UncheckedAccount<'info>,
 
     #[account(
         mut,
@@ -462,14 +470,34 @@ pub fn accept_offer_handler<'info>(
 
     let seller_role: Account<RoleAccount> = Account::try_from(&ctx.accounts.seller_role)?;
     require!(seller_role.is_compliant(), MarketplaceError::NotCompliant);
+    let expected_role = Pubkey::find_program_address(
+        &[
+            xcavate_whitelist::ROLE_SEED,
+            ctx.accounts.offeror.key().as_ref(),
+            &[Role::RealEstateInvestor.seed_byte()],
+        ],
+        &xcavate_whitelist::ID,
+    )
+    .0;
+    require!(
+        ctx.accounts.offeror_role.key() == expected_role,
+        MarketplaceError::NotCompliant
+    );
+    let offeror_role: Account<RoleAccount> = Account::try_from(&ctx.accounts.offeror_role)?;
+    require!(offeror_role.is_compliant(), MarketplaceError::NotCompliant);
     let config: Account<Config> = Account::try_from(&ctx.accounts.config)?;
     require!(
         ctx.accounts.treasury.key() == config.treasury,
         MarketplaceError::WrongPayee
     );
 
-    // Ownership cap, against the snapshot on the primary listing.
+    // Ownership cap and status, against the primary listing. Finalized is
+    // terminal today; the gate keeps that assumption local.
     let primary: Account<Listing> = Account::try_from(&ctx.accounts.listing)?;
+    require!(
+        primary.status == ListingStatus::Finalized,
+        MarketplaceError::PropertyNotFinalized
+    );
     let mut property: Account<PropertyAsset> = Account::try_from(&ctx.accounts.property)?;
     let owned_after = (ctx.accounts.offeror_holding.amount as u64)
         .checked_add(amount as u64)

@@ -516,7 +516,8 @@ pub fn seed_property_asset(svm: &mut LiteSVM, asset_id: u64, region_id: u16, pos
     );
     let property = PropertyAsset {
         asset_id,
-        core_asset: Pubkey::new_unique(),
+        name: "10 Test Street".into(),
+        metadata_uri: "ipfs://property-docs".into(),
         share_mint: Pubkey::new_unique(),
         region_id,
         location: postcode.to_vec(),

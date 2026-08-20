@@ -51,9 +51,16 @@ pub fn create_spv_handler(ctx: Context<CreateSpv>, listing_id: u64) -> Result<()
         ctx.accounts.listing.status == ListingStatus::Listed,
         MarketplaceError::ListingNotActive
     );
+    // Full reservation also underpins the exit guards: no position can be
+    // paid and re-reserved at once. Loosening this can trap funds there.
+    let committed = ctx
+        .accounts
+        .listing
+        .reserved_share_amount
+        .checked_add(ctx.accounts.listing.sold_share_amount)
+        .ok_or(MarketplaceError::Overflow)?;
     require!(
-        ctx.accounts.listing.reserved_share_amount + ctx.accounts.listing.sold_share_amount
-            == ctx.accounts.listing.listed_share_amount,
+        committed == ctx.accounts.listing.listed_share_amount,
         MarketplaceError::NotFullyReserved
     );
     require!(

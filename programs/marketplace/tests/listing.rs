@@ -49,7 +49,7 @@ fn list_property_creates_listing_and_locks_deposit() {
     assert_eq!(property.location, POSTCODE.to_vec());
     assert_eq!(property.share_amount, SHARE_AMOUNT);
     // The Core asset and share mint don't exist until init_property_assets.
-    assert_eq!(property.core_asset, Pubkey::default());
+    assert_eq!(property.metadata_uri, "");
     assert_eq!(property.share_mint, Pubkey::default());
 
     assert_eq!(
@@ -281,6 +281,31 @@ fn upgrade_object_rejects_after_expiry() {
         &developer,
         &[&developer],
         "ListingExpired",
+    );
+}
+
+#[test]
+fn upgrade_object_requires_compliance() {
+    let (mut svm, admin, _authority, developer) = setup_listing();
+    ok(
+        &mut svm,
+        list_ix(&developer.pubkey(), 0),
+        &developer,
+        &[&developer],
+    );
+    set_permission(
+        &mut svm,
+        &admin,
+        &developer.pubkey(),
+        Role::RealEstateDeveloper,
+        false,
+    );
+    fails_with(
+        &mut svm,
+        upgrade_ix(&developer.pubkey(), 0, 2 * SHARE_PRICE),
+        &developer,
+        &[&developer],
+        "NotCompliant",
     );
 }
 

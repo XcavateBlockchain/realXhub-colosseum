@@ -615,14 +615,88 @@ fn close_dead_listing_sweeps_donated_dust() {
     assert!(svm
         .get_account(&listing_payment_ata(0))
         .is_none_or(|acc| acc.data.is_empty()));
-    // The deed burned with the property; Core leaves a one-byte
-    // uninitialized marker behind.
-    let deed = svm.get_account(&core_asset_pda(0)).unwrap();
-    assert_eq!(deed.data, vec![0]);
     let treasury_acc = svm.get_account(&treasury_payment_ata()).unwrap();
     let state: anchor_spl::token::spl_token::state::Account =
         anchor_lang::solana_program::program_pack::Pack::unpack(&treasury_acc.data).unwrap();
     assert_eq!(state.amount, 5);
+}
+
+// A mint rotated out of the config must not strand what a live listing's
+// vault still holds in it: the sweep follows `listing.collected`, not the
+// current accepted list.
+#[test]
+fn teardown_survives_a_config_mint_rotation() {
+    // setup_listed drops the config authority, and this test needs it.
+    let (mut svm, admin, authority) = setup();
+    let operator = funded(&mut svm);
+    seed_region(&mut svm, 1, &operator.pubkey());
+    seed_location(&mut svm, 1, POSTCODE);
+    let developer = new_developer(&mut svm, &admin);
+    ok(
+        &mut svm,
+        list_ix(&developer.pubkey(), 0),
+        &developer,
+        &[&developer],
+    );
+    ok(
+        &mut svm,
+        init_assets_ix(&developer.pubkey(), 0),
+        &developer,
+        &[&developer],
+    );
+    let investor = new_investor(&mut svm, &admin);
+    buy(&mut svm, &admin, &investor, 10);
+    warp(&mut svm, LISTING_DURATION + 1);
+    ok(
+        &mut svm,
+        withdraw_expired_ix(&investor.pubkey(), 0),
+        &investor,
+        &[&investor],
+    );
+    ok(
+        &mut svm,
+        withdraw_deposit_ix(&developer.pubkey(), 0),
+        &developer,
+        &[&developer],
+    );
+
+    // tGBP, which this sale collected, gets dropped from the accepted list.
+    let mut params = default_params();
+    params.accepted_payment_mints = vec![gbp6_mint()];
+    ok(
+        &mut svm,
+        update_config_ix(&authority.pubkey(), params),
+        &authority,
+        &[&authority],
+    );
+
+    // Dust left in the dropped mint still sweeps to the treasury and the
+    // teardown completes.
+    set_token_account_for(
+        &mut svm,
+        tgbp_mint(),
+        listing_payment_ata(0),
+        &listing_vault_pda(0),
+        7,
+    );
+    set_token_account_for(
+        &mut svm,
+        tgbp_mint(),
+        treasury_payment_ata(),
+        &treasury(),
+        0,
+    );
+    let cranker = funded(&mut svm);
+    ok(
+        &mut svm,
+        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
+        &cranker,
+        &[&cranker],
+    );
+    assert_eq!(token_balance(&svm, &treasury_payment_ata()), 7);
+    assert!(svm
+        .get_account(&listing_pda(0))
+        .is_none_or(|a| a.data.is_empty()));
 }
 
 #[test]
@@ -689,9 +763,10 @@ fn close_dead_listing_from_pending_assets() {
     );
 
     let cranker = funded(&mut svm);
+    // Nothing was ever collected, so the sweep takes no payment triples.
     ok(
         &mut svm,
-        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), false),
+        close_dead_listing_ix_for(&cranker.pubkey(), 0, &developer.pubkey(), false, &[]),
         &cranker,
         &[&cranker],
     );
@@ -733,7 +808,7 @@ fn teardown_waits_for_cancelled_positions() {
     let cranker = funded(&mut svm);
     fails_with(
         &mut svm,
-        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
+        close_dead_listing_ix_for(&cranker.pubkey(), 0, &developer.pubkey(), true, &[]),
         &cranker,
         &[&cranker],
         "PositionsOutstanding",
@@ -748,7 +823,7 @@ fn teardown_waits_for_cancelled_positions() {
     );
     ok(
         &mut svm,
-        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
+        close_dead_listing_ix_for(&cranker.pubkey(), 0, &developer.pubkey(), true, &[]),
         &cranker,
         &[&cranker],
     );

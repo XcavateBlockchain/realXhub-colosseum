@@ -16,8 +16,8 @@ use xcavate_whitelist::state::{Role, RoleAccount};
 /// flag, since this starts a flow that takes investor funds. The location must
 /// be registered in the region, the developer locks the listing deposit, and
 /// the region's tax and listing duration are snapshotted. The listing starts
-/// as `PendingAssets`; `init_property_assets` creates the Core asset and share
-/// mint and opens it for purchases.
+/// as `PendingAssets`; `init_property_assets` creates the share mint and
+/// opens it for purchases.
 #[derive(Accounts)]
 #[instruction(region_id: u16, postcode: Vec<u8>)]
 pub struct ListProperty<'info> {
@@ -169,7 +169,6 @@ pub fn list_property_handler(
 
     let property = &mut ctx.accounts.property;
     property.asset_id = listing_id;
-    property.core_asset = Pubkey::default();
     property.share_mint = Pubkey::default();
     property.region_id = region_id;
     property.location = postcode;
@@ -235,7 +234,8 @@ pub fn list_property_handler(
 pub struct UpgradeObject<'info> {
     pub developer: Signer<'info>,
 
-    /// The caller's RealEstateDeveloper role, owned by the roles program.
+    /// The caller's RealEstateDeveloper role, owned by the roles program;
+    /// must be compliant, since repricing steers investor money.
     #[account(
         seeds = [
             xcavate_whitelist::ROLE_SEED,
@@ -244,6 +244,7 @@ pub struct UpgradeObject<'info> {
         ],
         bump = developer_role.bump,
         seeds::program = xcavate_whitelist::ID,
+        constraint = developer_role.is_compliant() @ MarketplaceError::NotCompliant,
     )]
     pub developer_role: Box<Account<'info, RoleAccount>>,
 

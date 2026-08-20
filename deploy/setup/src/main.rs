@@ -137,7 +137,11 @@ fn regions_vault() -> Pubkey {
     Pubkey::find_program_address(&[regions::VAULT_SEED], &regions::ID).0
 }
 fn region_pda(region_id: u16) -> Pubkey {
-    Pubkey::find_program_address(&[regions::REGION_SEED, &region_id.to_le_bytes()], &regions::ID).0
+    Pubkey::find_program_address(
+        &[regions::REGION_SEED, &region_id.to_le_bytes()],
+        &regions::ID,
+    )
+    .0
 }
 fn region_state_pda(region_id: u16) -> Pubkey {
     Pubkey::find_program_address(
@@ -179,7 +183,11 @@ fn marketplace_vault() -> Pubkey {
     Pubkey::find_program_address(&[marketplace::VAULT_SEED], &marketplace::ID).0
 }
 fn lawyer_pda(wallet: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[marketplace::LAWYER_SEED, wallet.as_ref()], &marketplace::ID).0
+    Pubkey::find_program_address(
+        &[marketplace::LAWYER_SEED, wallet.as_ref()],
+        &marketplace::ID,
+    )
+    .0
 }
 
 fn property_config() -> Pubkey {
@@ -207,8 +215,8 @@ impl Ctx {
     fn send(&self, label: &str, ix: Instruction, payer: &Keypair, signers: &[&Keypair]) {
         let blockhash = self.rpc.get_latest_blockhash().expect("blockhash");
         let msg = Message::new_with_blockhash(&[ix], Some(&payer.pubkey()), &blockhash);
-        let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), signers)
-            .expect("signing");
+        let tx =
+            VersionedTransaction::try_new(VersionedMessage::Legacy(msg), signers).expect("signing");
         let sig = self
             .rpc
             .send_and_confirm_transaction(&tx)
@@ -304,7 +312,11 @@ fn main() {
         ("investor2", investor2.pubkey(), Role::RealEstateInvestor),
         ("lawyer1", lawyer1.pubkey(), Role::Lawyer),
         ("lawyer2", lawyer2.pubkey(), Role::Lawyer),
-        ("spv-confirmer", spv_confirmer.pubkey(), Role::SpvConfirmation),
+        (
+            "spv-confirmer",
+            spv_confirmer.pubkey(),
+            Role::SpvConfirmation,
+        ),
         ("letting-agent", letting_agent.pubkey(), Role::LettingAgent),
     ];
     for (name, user, role) in assignments {
@@ -450,10 +462,9 @@ fn main() {
                                 .rpc
                                 .get_account(&regions_config())
                                 .expect("regions config");
-                            let config = regions::state::Config::try_deserialize(
-                                &mut acc.data.as_slice(),
-                            )
-                            .expect("regions config deser");
+                            let config =
+                                regions::state::Config::try_deserialize(&mut acc.data.as_slice())
+                                    .expect("regions config deser");
                             proposal_pda(config.proposal_counter)
                         },
                         token_program: TOKEN,
@@ -470,9 +481,8 @@ fn main() {
             .rpc
             .get_account(&region_state_pda(REGION_ID))
             .expect("region state");
-        let state =
-            regions::state::RegionState::try_deserialize(&mut state_acc.data.as_slice())
-                .expect("region state deser");
+        let state = regions::state::RegionState::try_deserialize(&mut state_acc.data.as_slice())
+            .expect("region state deser");
         assert!(
             state.status != regions::state::RegionStatus::Rejected,
             "region {REGION_ID} proposal was rejected; run clear_region_state and re-run"
@@ -598,45 +608,6 @@ fn main() {
             ),
             &operator,
             &[&operator],
-        );
-    }
-
-    // --- the region's Core collection, so listings can mint their deeds ---
-    let core_collection = Pubkey::find_program_address(
-        &[marketplace::CORE_COLLECTION_SEED, &REGION_ID.to_le_bytes()],
-        &marketplace::ID,
-    )
-    .0;
-    if ctx.exists(&core_collection) {
-        println!("  - region collection already created");
-    } else {
-        ctx.send(
-            "create region collection",
-            Instruction::new_with_bytes(
-                marketplace::ID,
-                &marketplace::instruction::CreateRegionCollection {
-                    region_id: REGION_ID,
-                    name: format!("realXmarket region {REGION_ID}"),
-                    uri: String::new(),
-                }
-                .data(),
-                marketplace::accounts::CreateRegionCollection {
-                    authority: authority.pubkey(),
-                    config: marketplace_config(),
-                    region: region_pda(REGION_ID),
-                    core_collection,
-                    core_auth: Pubkey::find_program_address(
-                        &[marketplace::CORE_AUTH_SEED],
-                        &marketplace::ID,
-                    )
-                    .0,
-                    mpl_core_program: marketplace::MPL_CORE_PROGRAM,
-                    system_program: SYS,
-                }
-                .to_account_metas(None),
-            ),
-            &authority,
-            &[&authority],
         );
     }
 

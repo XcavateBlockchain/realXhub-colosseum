@@ -243,10 +243,10 @@ pub struct SettleCancelledFees<'info> {
     )]
     pub listing: Box<Account<'info, Listing>>,
 
-    /// Must be on the accepted list: a stray mint would draw down the debt
-    /// with worthless units.
+    /// Must be a mint the sale actually collected; the listing's own record,
+    /// so a config rotation can't strand the payout.
     #[account(
-        constraint = config.accepted_payment_mints.contains(&payment_mint.key())
+        constraint = listing.collected.iter().any(|c| c.mint == payment_mint.key())
             @ MarketplaceError::InvalidMint,
     )]
     pub payment_mint: Box<InterfaceAccount<'info, Mint>>,
@@ -264,13 +264,15 @@ pub struct SettleCancelledFees<'info> {
     )]
     pub listing_payment_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// The lawyer's account for this mint; where their costs land.
-    #[account(
-        mut,
-        token::mint = payment_mint,
-        token::authority = listing.spv_costs_payee,
-    )]
-    pub lawyer_payment_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    /// CHECK: the payee lawyer, from the listing; authority of the ATA
+    /// below.
+    #[account(address = listing.spv_costs_payee @ MarketplaceError::WrongPayee)]
+    pub lawyer: UncheckedAccount<'info>,
+
+    /// CHECK: the lawyer's ATA for this mint, created here if it doesn't
+    /// exist yet, so a closed account can't strand their costs.
+    #[account(mut)]
+    pub lawyer_payment_account: UncheckedAccount<'info>,
 
     /// CHECK: the treasury owner key from config; authority of the ATA below.
     #[account(address = config.treasury @ MarketplaceError::InvalidConfig)]
@@ -316,6 +318,17 @@ pub fn settle_cancelled_fees_handler(
     let id_bytes = listing_id.to_le_bytes();
     let vault_seeds: &[&[u8]] = &[LISTING_VAULT_SEED, &id_bytes, &[ctx.bumps.listing_vault]];
     if lawyer_cut > 0 {
+        create_idempotent(CpiContext::new(
+            ctx.accounts.associated_token_program.key(),
+            CreateAta {
+                payer: ctx.accounts.cranker.to_account_info(),
+                associated_token: ctx.accounts.lawyer_payment_account.to_account_info(),
+                authority: ctx.accounts.lawyer.to_account_info(),
+                mint: ctx.accounts.payment_mint.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                token_program: ctx.accounts.payment_token_program.to_account_info(),
+            },
+        ))?;
         transfer_checked(
             CpiContext::new_with_signer(
                 ctx.accounts.payment_token_program.key(),
@@ -389,7 +402,9 @@ fn settle_dead_listing_exit(
         MarketplaceError::ReservationOutstanding
     );
     // The ledger must agree with the position before it closes on the
-    // position's number, and no locked share may leave.
+    // position's number, and no locked share may leave. A paid position is
+    // never also reserved (`create_spv`'s full-reservation rule), so the
+    // reservation guard below can't trap one.
     require!(
         ctx.accounts.holding.amount == amount,
         MarketplaceError::LedgerMismatch

@@ -301,6 +301,62 @@ fn accept_respects_the_ownership_cap() {
     );
 }
 
+#[test]
+fn accept_requires_a_still_compliant_bidder() {
+    let (mut svm, admin, investors) = listed_property();
+    let seller = &investors[1];
+    let offeror = new_investor(&mut svm, &admin);
+    bid(&mut svm, &offeror, 10, BID);
+
+    // KYC revoked between make and accept: shares must not be delivered.
+    set_permission(
+        &mut svm,
+        &admin,
+        &offeror.pubkey(),
+        Role::RealEstateInvestor,
+        false,
+    );
+    fails_with(
+        &mut svm,
+        accept_offer_ix(&seller.pubkey(), 0, 0, &offeror.pubkey(), 0, tgbp_mint()),
+        seller,
+        &[seller],
+        "NotCompliant",
+    );
+    // The revoked bidder still gets their money back; exits are role-free.
+    ok(
+        &mut svm,
+        cancel_offer_ix(&offeror.pubkey(), 0, tgbp_mint()),
+        &offeror,
+        &[&offeror],
+    );
+    assert_eq!(
+        token_balance(&svm, &payment_ata(&offeror.pubkey(), &tgbp_mint())),
+        50_000_000_000
+    );
+}
+
+#[test]
+fn seller_cannot_bid_on_own_listing() {
+    let (mut svm, _admin, investors) = listed_property();
+    let seller = &investors[1];
+    give_tgbp(&mut svm, &seller.pubkey(), 200_000_000_000);
+    fails_with(
+        &mut svm,
+        make_offer_ix(
+            &seller.pubkey(),
+            0,
+            5,
+            BID,
+            tgbp_mint(),
+            tgbp_acc(&seller.pubkey()),
+        ),
+        seller,
+        &[seller],
+        "SelfOffer",
+    );
+}
+
 // --- reject / cancel ---
 
 #[test]

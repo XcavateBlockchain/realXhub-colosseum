@@ -409,7 +409,14 @@ pub fn buy_property_shares_handler(
         .ok_or(MarketplaceError::Overflow)?;
 
     let listing = &mut ctx.accounts.listing;
-    listing.record_collected(ctx.accounts.payment_mint.key(), funds, fee, tax)?;
+    let fee_quote = bps_of(
+        listing
+            .share_price
+            .checked_mul(amount as u64)
+            .ok_or(MarketplaceError::Overflow)?,
+        listing.investor_fee_bps,
+    )?;
+    listing.record_collected(ctx.accounts.payment_mint.key(), funds, fee, fee_quote, tax)?;
     if !position_exists {
         listing.position_count = listing
             .position_count

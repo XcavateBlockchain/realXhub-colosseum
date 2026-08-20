@@ -541,7 +541,14 @@ pub fn claim_shares_handler(ctx: Context<ClaimShares>, listing_id: u64) -> Resul
     } else {
         tax
     };
-    listing.record_collected(ctx.accounts.payment_mint.key(), funds, fee, tax_owed)?;
+    let fee_quote = crate::instructions::buy::scale_from_mint(fee, mint_decimals)?;
+    listing.record_collected(
+        ctx.accounts.payment_mint.key(),
+        funds,
+        fee,
+        fee_quote,
+        tax_owed,
+    )?;
     listing.reserved_share_amount = listing
         .reserved_share_amount
         .checked_sub(amount)
@@ -606,10 +613,12 @@ pub fn unreserve_shares_handler(ctx: Context<UnreserveShares>, listing_id: u64) 
     // Both checks matter: the deadline stays set after missed reservations
     // are swept, and the sale can be fully reserved before the SPV attests.
     let listing = &ctx.accounts.listing;
+    let committed = listing
+        .reserved_share_amount
+        .checked_add(listing.sold_share_amount)
+        .ok_or(MarketplaceError::Overflow)?;
     require!(
-        listing.claim_deadline == 0
-            && listing.reserved_share_amount + listing.sold_share_amount
-                < listing.listed_share_amount,
+        listing.claim_deadline == 0 && committed < listing.listed_share_amount,
         MarketplaceError::SaleLocked
     );
     let amount = ctx.accounts.position.reserved_share_amount;
@@ -681,8 +690,9 @@ pub fn release_reservation_handler(
     require!(!claim_possible, MarketplaceError::ListingStillActive);
     let amount = ctx.accounts.position.reserved_share_amount;
     require!(amount > 0, MarketplaceError::NothingReserved);
-    // A paid position must exit through its own withdraw; only a purely
-    // reserved one can close here.
+    // A paid position must exit through its own withdraw. Paired with the
+    // withdraw-side guard this would trap a paid-and-reserved position;
+    // `create_spv`'s full-reservation rule is what makes that unreachable.
     require!(
         ctx.accounts.position.share_amount == 0,
         MarketplaceError::SharesOutstanding

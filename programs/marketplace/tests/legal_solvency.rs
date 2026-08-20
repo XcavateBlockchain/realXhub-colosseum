@@ -60,13 +60,25 @@ fn mint_holders(
     all.push(acc(sl));
     all.push(acc(developer));
     all.push(acc(operator));
+    // The fee settlement pays lawyers at their canonical ATAs.
+    all.push(payment_ata(dl, &mint));
+    all.push(payment_ata(sl, &mint));
     all.push(payment_ata(&listing_vault_pda(0), &mint));
     all.push(payment_ata(&treasury(), &mint));
     all
 }
 
 fn total_in(svm: &LiteSVM, accounts: &[Pubkey]) -> u64 {
-    accounts.iter().map(|a| token_balance(svm, a)).sum()
+    // ATAs the flow hasn't created yet count as zero.
+    accounts
+        .iter()
+        .filter(|a| {
+            svm.get_account(a)
+                .map(|acc| !acc.data.is_empty())
+                .unwrap_or(false)
+        })
+        .map(|a| token_balance(svm, a))
+        .sum()
 }
 
 /// The fee component of one position, in its own mint's units (floored the
@@ -109,10 +121,12 @@ fn check_invariants(
     // Neither lawyer can collect more than their quote, plus the tax the
     // settlement routes through the SPV side.
     let tax_quote = SHARE_PRICE * 100 * 300 / 10_000;
-    let dl_gain_quote =
-        token_balance(svm, &tgbp_acc(dl)) + token_balance(svm, &gbp6_acc(dl)) * 1_000;
-    let sl_gain_quote =
-        token_balance(svm, &tgbp_acc(sl)) + token_balance(svm, &gbp6_acc(sl)) * 1_000;
+    let quote_gain = |who: &Pubkey| {
+        total_in(svm, &[tgbp_acc(who), payment_ata(who, &tgbp_mint())])
+            + total_in(svm, &[gbp6_acc(who), payment_ata(who, &gbp6_mint())]) * 1_000
+    };
+    let dl_gain_quote = quote_gain(dl);
+    let sl_gain_quote = quote_gain(sl);
     prop_assert!(dl_gain_quote <= COSTS);
     prop_assert!(sl_gain_quote <= COSTS + tax_quote);
 
@@ -442,12 +456,7 @@ proptest! {
                     let _ = process(&mut svm, ix, &cranker, &[&cranker]);
                 }
                 11 => {
-                    let ix = settle_fees_ix_with_mint(
-                        &cranker.pubkey(),
-                        0,
-                        gbp6_mint(),
-                        gbp6_acc(&sl.pubkey()),
-                    );
+                    let ix = settle_fees_ix_with_mint(&cranker.pubkey(), 0, gbp6_mint(), &sl.pubkey());
                     let _ = process(&mut svm, ix, &cranker, &[&cranker]);
                 }
                 12 => {
@@ -468,11 +477,12 @@ proptest! {
                     let _ = process(&mut svm, ix, &cranker, &[&cranker]);
                 }
                 _ => {
-                    let ix = close_dead_listing_ix(
+                    let ix = close_dead_listing_ix_for(
                         &cranker.pubkey(),
                         0,
                         &developer.pubkey(),
                         true,
+                        &[tgbp_mint(), gbp6_mint()],
                     );
                     let _ = process(&mut svm, ix, &cranker, &[&cranker]);
                 }
@@ -511,7 +521,7 @@ proptest! {
             );
             let _ = process(
                 &mut svm,
-                settle_fees_ix_with_mint(&cranker.pubkey(), 0, gbp6_mint(), gbp6_acc(&sl.pubkey())),
+                settle_fees_ix_with_mint(&cranker.pubkey(), 0, gbp6_mint(), &sl.pubkey()),
                 &cranker,
                 &[&cranker],
             );
@@ -523,7 +533,13 @@ proptest! {
             );
             let _ = process(
                 &mut svm,
-                close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
+                close_dead_listing_ix_for(
+                    &cranker.pubkey(),
+                    0,
+                    &developer.pubkey(),
+                    true,
+                    &[tgbp_mint(), gbp6_mint()],
+                ),
                 &cranker,
                 &[&cranker],
             );

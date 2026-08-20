@@ -298,10 +298,17 @@ fn cancelled_sale_refunds_and_pays_the_review() {
         &[&developer],
     );
     // Teardown must wait for the fee settlement: the money still in the
-    // vault includes the lawyer's pay.
+    // vault includes the lawyer's pay. This sale only ever collected tGBP,
+    // so that's the one triple the sweep takes.
     fails_with(
         &mut svm,
-        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
+        close_dead_listing_ix_for(
+            &cranker.pubkey(),
+            0,
+            &developer.pubkey(),
+            true,
+            &[tgbp_mint()],
+        ),
         &cranker,
         &[&cranker],
         "CostsStillDue",
@@ -315,7 +322,10 @@ fn cancelled_sale_refunds_and_pays_the_review() {
         &cranker,
         &[&cranker],
     );
-    assert_eq!(tgbp_balance(&svm, &spv_lawyer.pubkey()), COSTS);
+    assert_eq!(
+        token_balance(&svm, &payment_ata(&spv_lawyer.pubkey(), &tgbp_mint())),
+        COSTS
+    );
     let treasury_acc = svm.get_account(&treasury_payment_ata()).unwrap();
     let treasury_state: anchor_spl::token::spl_token::state::Account =
         anchor_lang::solana_program::program_pack::Pack::unpack(&treasury_acc.data).unwrap();
@@ -325,7 +335,13 @@ fn cancelled_sale_refunds_and_pays_the_review() {
     // And with the pot empty, the teardown goes through.
     ok(
         &mut svm,
-        close_dead_listing_ix(&cranker.pubkey(), 0, &developer.pubkey(), true),
+        close_dead_listing_ix_for(
+            &cranker.pubkey(),
+            0,
+            &developer.pubkey(),
+            true,
+            &[tgbp_mint()],
+        ),
         &cranker,
         &[&cranker],
     );
@@ -391,8 +407,11 @@ fn silence_defaults_to_rejection() {
     assert!(!listing.second_attempt);
 }
 
+// The crank only serves the SPV lawyer's claim; with the SPV side silent
+// nobody's pay is at stake, and cancelling would retain investor fees the
+// timeout exit refunds. So that direction must ride to the deadline.
 #[test]
-fn a_silent_spv_lawyer_earns_nothing() {
+fn a_silent_spv_side_cannot_be_cranked() {
     let (mut svm, _admin, _developer, _investors, dev_lawyer, _spv_lawyer) = setup_engaged();
     ok(
         &mut svm,
@@ -402,15 +421,14 @@ fn a_silent_spv_lawyer_earns_nothing() {
     );
     warp(&mut svm, 70_000);
     let cranker = funded(&mut svm);
-    ok(
+    fails_with(
         &mut svm,
         resolve_silent_ix(&cranker.pubkey(), 0),
         &cranker,
         &[&cranker],
+        "NoVerdictPassed",
     );
-    let listing = listing_of(&svm, 0);
-    assert_eq!(listing.status, ListingStatus::Cancelled);
-    assert_eq!(listing.spv_costs_due, 0);
+    assert_eq!(listing_of(&svm, 0).status, ListingStatus::SoldOut);
 }
 
 #[test]

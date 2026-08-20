@@ -869,7 +869,13 @@ pub fn finalize_challenge_handler(ctx: Context<FinalizeChallenge>, asset_id: u64
     let mut removed = false;
     if passed && seated {
         let slash_cap = ctx.accounts.config.agent_slash_amount;
-        let strikes = ctx.accounts.letting.governance.strikes + 1;
+        let strikes = ctx
+            .accounts
+            .letting
+            .governance
+            .strikes
+            .checked_add(1)
+            .ok_or(PropertyError::Overflow)?;
         let expected =
             Pubkey::find_program_address(&[AGENT_SEED, struck_agent.as_ref()], &crate::ID).0;
         let entry = ctx

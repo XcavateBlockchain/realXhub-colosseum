@@ -213,7 +213,7 @@ pub fn claim_spv_case_handler(
     // The SPV lawyer is the only one the fee pot pays; the developer's own
     // lawyer is a private arrangement.
     require!(
-        costs <= listing.total_fee_quote()?,
+        costs <= listing.collected_fee_quote,
         MarketplaceError::CostsExceedFees
     );
 
@@ -456,13 +456,11 @@ pub fn confirm_documents_handler(
     Ok(())
 }
 
-/// Cancel a sale whose one standing verdict the other side is sitting out.
-/// A lawyer's pay must not depend on the counterparty choosing to rule, so
-/// once the legal window enters its final fifth, anyone can default the
-/// silent side to a rejection and the sale cancels. No revision round: a
-/// silence is not a disagreement someone could revise the documents over.
-/// The SPV lawyer is only paid from the retained fees if theirs was the
-/// side that ruled.
+/// Cancel a sale whose standing SPV verdict the developer's side is
+/// sitting out, so the SPV lawyer's pay never depends on the counterparty
+/// choosing to rule. One-directional on purpose: with the SPV side silent
+/// nobody's pay is at stake, and cancelling would keep investor fees the
+/// timeout exit refunds, so that case just rides to the deadline.
 #[derive(Accounts)]
 #[instruction(listing_id: u64)]
 pub struct ResolveSilentVerdict<'info> {
@@ -498,21 +496,11 @@ pub fn resolve_silent_verdict_handler(
 
     let dev_ruled = listing.developer_lawyer.doc_status != DocumentStatus::Pending;
     let spv_ruled = listing.spv_lawyer.doc_status != DocumentStatus::Pending;
-    require!(dev_ruled != spv_ruled, MarketplaceError::NoVerdictPassed);
+    require!(spv_ruled && !dev_ruled, MarketplaceError::NoVerdictPassed);
 
-    let silent_side = if dev_ruled {
-        &mut listing.spv_lawyer
-    } else {
-        &mut listing.developer_lawyer
-    };
-    let silent_lawyer = silent_side.lawyer;
-    silent_side.doc_status = DocumentStatus::Rejected;
+    let silent_lawyer = listing.developer_lawyer.lawyer;
+    listing.developer_lawyer.doc_status = DocumentStatus::Rejected;
     cancel_sale(listing);
-    if !spv_ruled {
-        // A silent SPV lawyer did no review; the whole pot goes to the
-        // treasury.
-        listing.spv_costs_due = 0;
-    }
 
     emit!(SilentVerdictResolved {
         listing_id,

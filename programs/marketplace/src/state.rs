@@ -66,7 +66,7 @@ pub struct Config {
 /// Where a primary listing is in its lifecycle.
 #[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ListingStatus {
-    /// Created, but the Core asset and share mint don't exist yet.
+    /// Created, but the share mint doesn't exist yet.
     PendingAssets,
     /// Open for share purchases.
     Listed,
@@ -84,16 +84,25 @@ pub enum ListingStatus {
     Refunding,
 }
 
+/// Longest name and metadata URI a property may carry.
+pub const MAX_PROPERTY_NAME_LEN: usize = 40;
+pub const MAX_PROPERTY_URI_LEN: usize = 200;
+
 /// A fractionalized property. Created when it is listed and kept for the
-/// asset's whole life; the Core asset and share mint are attached by
+/// asset's whole life; the share mint and metadata are attached by
 /// `init_property_assets`.
 #[account]
 #[derive(InitSpace)]
 pub struct PropertyAsset {
     pub asset_id: u64,
-    /// The Metaplex Core asset held in the property vault. Default until the
-    /// assets are initialized.
-    pub core_asset: Pubkey,
+    /// Display name, e.g. the street address. Empty until the assets are
+    /// initialized.
+    #[max_len(MAX_PROPERTY_NAME_LEN)]
+    pub name: String,
+    /// IPFS URI of the property's documents and images; the canonical
+    /// off-chain record the frontend and indexers read.
+    #[max_len(MAX_PROPERTY_URI_LEN)]
+    pub metadata_uri: String,
     /// The Token-2022 share mint. Default until the assets are initialized.
     pub share_mint: Pubkey,
     pub region_id: u16,
@@ -229,6 +238,9 @@ pub struct Listing {
     /// `close_case` clears the assignment before the fees settle.
     pub spv_costs_due: u64,
     pub spv_costs_payee: Pubkey,
+    /// Investor fees collected so far, at `PRICE_DECIMALS`; caps the SPV
+    /// lawyer's charge without trusting the current share price.
+    pub collected_fee_quote: u64,
     /// What each payment mint collected across the sale, split the way
     /// settlement pays it out. Written by every claim and direct buy.
     #[max_len(MAX_PAYMENT_MINTS)]
@@ -242,14 +254,20 @@ impl Listing {
     /// The investor fees a full sale collects, quoted at `PRICE_DECIMALS`.
     /// Lawyer costs are capped by this pot; the per-buy transfers floor when
     /// rescaling to each mint, so settlement pays out with the same floor.
-    pub fn total_fee_quote(&self) -> Result<u64> {
-        let gross = self.share_price as u128 * self.listed_share_amount as u128;
-        u64::try_from(gross * self.investor_fee_bps as u128 / 10_000)
-            .map_err(|_| crate::error::MarketplaceError::Overflow.into())
-    }
-
-    /// Add one payment's components to its mint's collected totals.
-    pub fn record_collected(&mut self, mint: Pubkey, funds: u64, fee: u64, tax: u64) -> Result<()> {
+    /// Add one payment's components to its mint's collected totals;
+    /// `fee_quote` is the same fee at `PRICE_DECIMALS`.
+    pub fn record_collected(
+        &mut self,
+        mint: Pubkey,
+        funds: u64,
+        fee: u64,
+        fee_quote: u64,
+        tax: u64,
+    ) -> Result<()> {
+        self.collected_fee_quote = self
+            .collected_fee_quote
+            .checked_add(fee_quote)
+            .ok_or(crate::error::MarketplaceError::Overflow)?;
         use crate::error::MarketplaceError;
         let entry = match self.collected.iter_mut().find(|c| c.mint == mint) {
             Some(entry) => entry,

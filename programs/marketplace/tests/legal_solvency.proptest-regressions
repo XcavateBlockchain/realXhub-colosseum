@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc be2d9534f94cde42899b15a9954164384560199c18ea89af04922c65fa2ede3b # shrinks to ops = [(0, 1, true), (2, 0, true), (0, 13, false)]
+cc 3702e044c38cac91bd7faec5c7c8e6ead5f441b4c2596212167f9e77ceac0e28 # shrinks to ops = [(0, 0, false)]
+cc 522a0cd76c05d0415c28cd14114ae939c88bbc2318a09d7c925d6de9de722167 # shrinks to ops = [(1, 0, true), (0, 1, true), (0, 1, true), (1, 0, true)]
