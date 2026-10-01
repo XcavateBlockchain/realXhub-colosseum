@@ -14,3 +14,13 @@ pub const PAYMENT_VAULT_SEED: &[u8] = b"payment_vault";
 pub const BOND_VAULT_SEED: &[u8] = b"bond_vault";
 #[constant]
 pub const POSITION_SEED: &[u8] = b"position";
+
+#[constant]
+pub const RESERVATION_SALE_SEED: &[u8] = b"reservation_sale";
+#[constant]
+pub const HUB_RESERVATION_SEED: &[u8] = b"hub_reservation";
+#[constant]
+pub const PAYMENT_RESERVATION_SEED: &[u8] = b"payment_reservation";
+
+/// A fully reserved hub gives every buyer three complete days to pay.
+pub const CLAIM_WINDOW_SECONDS: i64 = 3 * 24 * 60 * 60;

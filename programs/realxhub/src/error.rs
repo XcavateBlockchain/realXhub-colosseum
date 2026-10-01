@@ -46,4 +46,12 @@ pub enum HubError {
     EmptyPosition,
     #[msg("Bond has already been refunded")]
     BondAlreadyRefunded,
+    #[msg("Paid purchases cannot be converted into unpaid reservations")]
+    PurchasesOutstanding,
+    #[msg("The wallet balance does not cover its unpaid hub reservations")]
+    ReservationBalanceTooLow,
+    #[msg("Reservation is bound to another payment account")]
+    ReservationAccountMismatch,
+    #[msg("Reservation has not reached its cleanup deadline")]
+    ReservationStillActive,
 }

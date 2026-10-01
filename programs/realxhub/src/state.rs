@@ -21,6 +21,9 @@ pub enum HubStatus {
     Listed,
     Funded,
     Failed,
+    // Append phases so existing Hub accounts keep their original status tags.
+    Reserving,
+    Claiming,
 }
 
 #[account]
@@ -63,5 +66,40 @@ pub struct BuyerPosition {
     pub amount: u64,
     pub paid: u64,
     pub settled: bool,
+    pub bump: u8,
+}
+
+/// Unpaid reservations are separate from the existing paid-sale accounts.
+/// Opting into this flow never reinterprets an old buyer's recorded payment.
+#[account]
+#[derive(InitSpace)]
+pub struct ReservationSale {
+    pub hub: Pubkey,
+    pub reserved_tokens: u64,
+    pub claim_started_at: i64,
+    pub claim_deadline: i64,
+    pub bump: u8,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct HubReservation {
+    pub hub: Pubkey,
+    pub buyer: Pubkey,
+    /// Claims must collect from the account against which the promise was made.
+    pub payment_account: Pubkey,
+    pub amount: u64,
+    /// Payment-mint base units promised, not money held by the program.
+    pub quoted_payment: u64,
+    pub bump: u8,
+}
+
+/// Sum of unpaid hub promises against one payment account. This does not lock
+/// the wallet or include reservations owned by the separate marketplace program.
+#[account]
+#[derive(InitSpace)]
+pub struct PaymentReservation {
+    pub payment_account: Pubkey,
+    pub amount: u64,
     pub bump: u8,
 }

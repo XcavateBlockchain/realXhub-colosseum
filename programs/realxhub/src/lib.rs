@@ -1,5 +1,5 @@
-//! Hub proposals and escrowed token sales. Review precedes activation; tokens
-//! are claimable only after a sellout, and an expired partial sale refunds buyers.
+//! Hub proposals, escrowed purchases, and optional unpaid reservations. Paid
+//! sales retain their original settlement path; reservations use separate records.
 
 pub mod constants;
 pub mod error;
@@ -68,5 +68,34 @@ pub mod realxhub {
     }
     pub fn refund_bond(ctx: Context<RefundBond>, hub_id: u64) -> Result<()> {
         activation::refund_bond_handler(ctx, hub_id)
+    }
+
+    pub fn open_reservations(ctx: Context<OpenReservations>, hub_id: u64) -> Result<()> {
+        reservation::open_reservations_handler(ctx, hub_id)
+    }
+
+    pub fn reserve_tokens(
+        ctx: Context<ReserveTokens>,
+        hub_id: u64,
+        amount: u64,
+        max_total_cost: u64,
+    ) -> Result<()> {
+        reservation::reserve_tokens_handler(ctx, hub_id, amount, max_total_cost)
+    }
+
+    pub fn cancel_reservation(ctx: Context<CancelReservation>, hub_id: u64) -> Result<()> {
+        reservation::cancel_reservation_handler(ctx, hub_id)
+    }
+
+    pub fn release_reservation(
+        ctx: Context<ReleaseReservation>,
+        hub_id: u64,
+        buyer: Pubkey,
+    ) -> Result<()> {
+        reservation::release_reservation_handler(ctx, hub_id, buyer)
+    }
+
+    pub fn finalize_reservations(ctx: Context<FinalizeReservations>, hub_id: u64) -> Result<()> {
+        reservation::finalize_reservations_handler(ctx, hub_id)
     }
 }
