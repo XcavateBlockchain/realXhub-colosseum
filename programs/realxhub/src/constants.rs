@@ -22,5 +22,25 @@ pub const HUB_RESERVATION_SEED: &[u8] = b"hub_reservation";
 #[constant]
 pub const PAYMENT_RESERVATION_SEED: &[u8] = b"payment_reservation";
 
+#[constant]
+pub const RESERVATION_CLAIM_SEED: &[u8] = b"reservation_claim";
+
+#[constant]
+pub const FUNDING_SEED: &[u8] = b"funding";
+
 /// A fully reserved hub gives every buyer three complete days to pay.
 pub const CLAIM_WINDOW_SECONDS: i64 = 3 * 24 * 60 * 60;
+
+#[constant]
+pub const MILESTONE_POLICY_SEED: &[u8] = b"milestone_policy";
+#[constant]
+pub const MILESTONE_SEED: &[u8] = b"milestone";
+
+/// Evidence must receive approval within 60 days of the first tranche.
+pub const MILESTONE_WINDOW_SECONDS: i64 = 60 * 24 * 60 * 60;
+pub const PROBABILITY_SCALE: u16 = 10_000;
+
+#[constant]
+pub const DEFAULT_SEED: &[u8] = b"default";
+#[constant]
+pub const DEFAULT_REDEMPTION_SEED: &[u8] = b"default_redemption";

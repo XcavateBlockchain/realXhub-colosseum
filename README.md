@@ -2,9 +2,9 @@
 
 This Anchor workspace contains the existing Xcavate property programs and a new `realxhub` program that combines hub proposals and token purchases.
 
-Operators create a draft and submit a specific revision for review. An authorized verifier approves or rejects it. Approved hubs can bond XCAV, mint a fixed token supply and open a sale. Buyers pay into escrow and claim tokens after sellout. An expired partial sale refunds buyers and returns the operator's bond.
+Operators create a draft and submit a specific revision for review. An authorized verifier approves or rejects it. Approved hubs can bond XCAV, mint a fixed token supply and open a sale. In legacy paid sales, buyers pay into escrow and claim tokens after sellout. An expired partial sale refunds buyers and returns the operator's bond.
 
-The reviewed reservation flow is now available as an optional, unpaid first step. Before any purchases, an operator can open reservations. Buyers record a token quantity and stablecoin quote without transferring either asset. The last reservation starts a three-day window on chain. This implements reservation accounting and expiry recovery; paid claims and milestone funding still need the settlement decisions listed in the program guide.
+The reservation flow is available as an optional, unpaid first step. Before any purchases, an operator can open reservations. Buyers record a token quantity and stablecoin quote without transferring either asset. The last reservation starts a three-day claim window. Buyers then pay and receive their allocations atomically; unpaid allocations can reopen after expiry. The final claim releases the first 50% payment tranche. Progress evidence can release the remaining payment when a configured automated assessor signs a qualifying probability score within 60 days of the first tranche. The program enforces that score threshold; an external scoring service must be supplied separately. See the [program guide](programs/realxhub/README.md) for the policy and integration contract.
 
 ## Changes
 
@@ -38,10 +38,12 @@ Initialize the hub config using the program's upgrade authority. Choose a verifi
 
 Operators need a compliant `RegionalOperator` role and must own the chosen region. Buyers currently reuse the compliant `RealEstateInvestor` role. Identity screening and document review happen off chain; the program records an authorized review tied to the submitted revision and hash.
 
-This first version bonds XCAV after approval and uses fixed-price, all-or-nothing sales. Tokens are standard transferable SPL tokens after claiming; their economic and governance rights are not defined here.
+This version bonds XCAV after approval and uses fixed prices. Legacy paid sales remain all-or-nothing; reservation buyers pay and receive tokens during claim rounds, with unpaid allocations reopening. Tokens are standard transferable SPL tokens after claiming; their economic and governance rights are not defined here.
 
-Successful-sale payments and bonds remain in escrow. Milestone payouts, automated evidence assessment, buybacks, slashing, verifier rotation and a frontend are later work. The existing deployment script does not initialize the new hub program.
+Reservation hubs support both payment tranches, with second-tranche approval gated by the configured assessor and probability threshold. After the 60-day approval deadline, anyone can declare an unapproved, fully funded reservation hub defaulted. Original buyers burn up to their purchased allocation to recover proportional shares of the remaining payment and recorded XCAV bond. Successful legacy sale payments and successful hub bonds remain in escrow. Automated scoring, oracle-based 30% collateral maintenance, successful bond release, verifier rotation and a frontend remain later work. The existing deployment script does not initialize the new hub program or its milestone policy.
 
-The new reservation flow cannot collect payment or deliver tokens yet. `Claiming` records the three-day window; it does not enable the existing paid-sale `claim_tokens` instruction. An unpaid campaign can expire, release its promises and return its recorded bond. The XCAV bond remains the configured fixed amount, not a calculated 30% value.
+Reservation buyers use `claim_reserved_tokens` to pay and receive tokens atomically within the three-day window. This does not enable the legacy `claim_tokens` instruction for unpaid promises. An entirely unpaid campaign can expire, release its promises and return its recorded bond. The XCAV bond remains the configured fixed amount, not a calculated 30% value.
+
+Default redemption uses the bond already recorded and locked; it does not promise a 30% valuation. Token burning and both asset payouts commit atomically, with cumulative receipts preventing over-redemption. See [the detailed implementation analysis](programs/realxhub/docs/IMPLEMENTATION.md).
 
 See [the hub program guide](programs/realxhub/README.md) for instructions, account derivations, deployment notes and the detailed rules.

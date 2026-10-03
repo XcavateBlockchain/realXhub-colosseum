@@ -98,7 +98,11 @@ pub fn reserve_tokens_handler(
         .reserved_tokens
         .checked_add(amount)
         .ok_or(HubError::Overflow)?;
-    require!(reserved <= hub.token_supply, HubError::InvalidAmount);
+    let allocated = hub
+        .tokens_sold
+        .checked_add(reserved)
+        .ok_or(HubError::Overflow)?;
+    require!(allocated <= hub.token_supply, HubError::InvalidAmount);
     let cost = hub
         .token_price
         .checked_mul(amount)
@@ -148,7 +152,7 @@ pub fn reserve_tokens_handler(
         .ok_or(HubError::Overflow)?;
     payment_reservation.amount = promised;
     ctx.accounts.sale.reserved_tokens = reserved;
-    if reserved == hub.token_supply {
+    if allocated == hub.token_supply {
         // Starting the window inside the last reservation avoids a backend
         // race and gives buyers three full days even near the sale deadline.
         ctx.accounts.sale.claim_started_at = now;
@@ -224,7 +228,7 @@ pub fn cancel_reservation_handler(ctx: Context<CancelReservation>, hub_id: u64) 
     Ok(())
 }
 
-fn release_position(
+pub(super) fn release_position(
     sale: &mut ReservationSale,
     reservation: &mut HubReservation,
     payment: &mut PaymentReservation,
@@ -332,8 +336,8 @@ pub fn finalize_reservations_handler(
     );
     require_expired(hub, &ctx.accounts.sale)?;
     // Only an entirely unpaid campaign can use the existing bond-return rule.
-    // Partial paid claims need their own agreed refund policy before enabling
-    // collection; this guard prevents a later change bypassing that settlement.
+    // Partially paid campaigns reopen their unpaid allocations. They must not
+    // fail through this path or return the operator's bond while buyers hold tokens.
     require!(
         hub.total_paid == 0 && hub.tokens_sold == 0 && hub.tokens_claimed == 0,
         HubError::PurchasesOutstanding
@@ -346,4 +350,55 @@ pub fn finalize_reservations_handler(
 #[event]
 pub struct ReservationsFailed {
     pub hub_id: u64,
+}
+
+/// Unpaid records must be cleared before a new round starts, so an old promise
+/// cannot become claimable again under the new round's deadline.
+#[derive(Accounts)]
+#[instruction(hub_id: u64)]
+pub struct ReopenReservations<'info> {
+    pub cranker: Signer<'info>,
+    #[account(mut, seeds = [HUB_SEED, &hub_id.to_le_bytes()], bump = hub.bump)]
+    pub hub: Box<Account<'info, Hub>>,
+    #[account(mut, seeds = [RESERVATION_SALE_SEED, &hub_id.to_le_bytes()], bump = sale.bump, has_one = hub @ HubError::InvalidPosition)]
+    pub sale: Box<Account<'info, ReservationSale>>,
+}
+
+pub fn reopen_reservations_handler(ctx: Context<ReopenReservations>, hub_id: u64) -> Result<()> {
+    let hub = &mut ctx.accounts.hub;
+    require!(
+        matches!(hub.status, HubStatus::Reserving | HubStatus::Claiming)
+            && hub.tokens_sold > 0
+            && hub.tokens_sold < hub.token_supply
+            && hub.tokens_claimed == hub.tokens_sold,
+        HubError::InvalidStatus
+    );
+    require_expired(hub, &ctx.accounts.sale)?;
+    require!(
+        ctx.accounts.sale.reserved_tokens == 0,
+        HubError::UnpaidReservationsOutstanding
+    );
+    hub.sale_deadline = Clock::get()?
+        .unix_timestamp
+        .checked_add(hub.sale_duration)
+        .ok_or(HubError::Overflow)?;
+    hub.status = HubStatus::Reserving;
+    ctx.accounts.sale.claim_started_at = 0;
+    ctx.accounts.sale.claim_deadline = 0;
+    emit!(ReservationsReopened {
+        hub_id,
+        remaining_tokens: hub
+            .token_supply
+            .checked_sub(hub.tokens_sold)
+            .ok_or(HubError::Overflow)?,
+        sale_deadline: hub.sale_deadline,
+    });
+    Ok(())
+}
+
+#[event]
+pub struct ReservationsReopened {
+    pub hub_id: u64,
+    pub remaining_tokens: u64,
+    pub sale_deadline: i64,
 }

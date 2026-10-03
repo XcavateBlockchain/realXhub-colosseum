@@ -54,4 +54,36 @@ pub enum HubError {
     ReservationAccountMismatch,
     #[msg("Reservation has not reached its cleanup deadline")]
     ReservationStillActive,
+    #[msg("Clear all expired unpaid reservations before reopening the campaign")]
+    UnpaidReservationsOutstanding,
+    #[msg("The first funding tranche has already been released")]
+    FirstTrancheAlreadyReleased,
+    #[msg("Invalid automated assessment policy")]
+    InvalidMilestonePolicy,
+    #[msg("Signer is not the configured automated assessor")]
+    NotAssessor,
+    #[msg("Invalid evidence or assessment reference")]
+    InvalidEvidence,
+    #[msg("Assessment does not match the current evidence revision and hash")]
+    EvidenceMismatch,
+    #[msg("Evidence approval window has closed")]
+    MilestoneExpired,
+    #[msg("The first funding tranche must be released before evidence submission")]
+    FirstTrancheRequired,
+    #[msg("The second funding tranche has already been released")]
+    SecondTrancheAlreadyReleased,
+    #[msg("Probability must be between 0 and 10000 basis points")]
+    InvalidProbability,
+    #[msg("The evidence approval deadline has not expired")]
+    DefaultStillActive,
+    #[msg("This hub cannot enter default settlement")]
+    DefaultNotAllowed,
+    #[msg("Escrow does not cover the recorded default pools")]
+    InsufficientDefaultEscrow,
+    #[msg("Redemption exceeds the original buyer's purchased allocation")]
+    RedemptionLimitExceeded,
+    #[msg("The buyer must hold the hub tokens being surrendered")]
+    InsufficientRedemptionTokens,
+    #[msg("Default payout is below the buyer's supplied minimum")]
+    PayoutBelowMinimum,
 }

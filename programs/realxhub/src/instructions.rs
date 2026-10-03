@@ -1,11 +1,19 @@
 pub mod activation;
+pub mod default;
+pub mod funding;
 pub mod initialize;
+pub mod milestone;
 pub mod proposal;
 pub mod purchase;
 pub mod reservation;
+pub mod reservation_claim;
 
 pub use activation::*;
+pub use default::*;
+pub use funding::*;
 pub use initialize::*;
+pub use milestone::*;
 pub use proposal::*;
 pub use purchase::*;
 pub use reservation::*;
+pub use reservation_claim::*;

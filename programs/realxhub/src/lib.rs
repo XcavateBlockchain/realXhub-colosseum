@@ -9,7 +9,9 @@ pub mod state;
 use anchor_lang::prelude::*;
 pub use constants::*;
 use instructions::*;
-pub use instructions::{ConfigParams, ProposalParams};
+pub use instructions::{
+    AssessmentParams, ConfigParams, EvidenceParams, MilestonePolicyParams, ProposalParams,
+};
 
 declare_id!("HbHu1p5KJJsCehawX5NBdqZXuGzHyqyPAsZcYUUz21b");
 
@@ -87,6 +89,14 @@ pub mod realxhub {
         reservation::cancel_reservation_handler(ctx, hub_id)
     }
 
+    pub fn claim_reserved_tokens(
+        ctx: Context<ClaimReservedTokens>,
+        hub_id: u64,
+        max_total_cost: u64,
+    ) -> Result<()> {
+        reservation_claim::claim_reserved_tokens_handler(ctx, hub_id, max_total_cost)
+    }
+
     pub fn release_reservation(
         ctx: Context<ReleaseReservation>,
         hub_id: u64,
@@ -95,7 +105,51 @@ pub mod realxhub {
         reservation::release_reservation_handler(ctx, hub_id, buyer)
     }
 
+    pub fn release_first_tranche(ctx: Context<ReleaseFirstTranche>, hub_id: u64) -> Result<()> {
+        funding::release_first_tranche_handler(ctx, hub_id)
+    }
+
+    pub fn reopen_reservations(ctx: Context<ReopenReservations>, hub_id: u64) -> Result<()> {
+        reservation::reopen_reservations_handler(ctx, hub_id)
+    }
+
     pub fn finalize_reservations(ctx: Context<FinalizeReservations>, hub_id: u64) -> Result<()> {
         reservation::finalize_reservations_handler(ctx, hub_id)
+    }
+    pub fn initialize_milestone_policy(
+        ctx: Context<InitializeMilestonePolicy>,
+        params: MilestonePolicyParams,
+    ) -> Result<()> {
+        milestone::initialize_policy_handler(ctx, params)
+    }
+
+    pub fn submit_evidence(
+        ctx: Context<SubmitEvidence>,
+        hub_id: u64,
+        params: EvidenceParams,
+    ) -> Result<()> {
+        milestone::submit_evidence_handler(ctx, hub_id, params)
+    }
+
+    pub fn assess_evidence(
+        ctx: Context<AssessEvidence>,
+        hub_id: u64,
+        params: AssessmentParams,
+    ) -> Result<()> {
+        milestone::assess_evidence_handler(ctx, hub_id, params)
+    }
+
+    pub fn declare_default(ctx: Context<DeclareDefault>, hub_id: u64) -> Result<()> {
+        default::declare_default_handler(ctx, hub_id)
+    }
+
+    pub fn redeem_default(
+        ctx: Context<RedeemDefault>,
+        hub_id: u64,
+        amount: u64,
+        min_payment_out: u64,
+        min_xcav_out: u64,
+    ) -> Result<()> {
+        default::redeem_default_handler(ctx, hub_id, amount, min_payment_out, min_xcav_out)
     }
 }
